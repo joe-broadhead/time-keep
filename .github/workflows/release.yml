@@ -1,0 +1,487 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish (for example: v0.0.0)"
+        required: true
+        default: "v0.0.0"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.93.0"
+
+jobs:
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    outputs:
+      release_tag: ${{ steps.resolve_tag.outputs.release_tag }}
+      release_version: ${{ steps.resolve_tag.outputs.release_version }}
+    permissions:
+      contents: read
+    steps:
+      - name: Resolve tag
+        id: resolve_tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          release_tag="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            release_tag="${INPUT_TAG}"
+          fi
+          if ! [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: ${release_tag}"
+            exit 1
+          fi
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "release_version=${release_tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Checkout release tag
+        env:
+          RELEASE_TAG: ${{ steps.resolve_tag.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          git checkout --detach "${RELEASE_TAG}"
+
+      - name: Ensure crate metadata matches tag
+        env:
+          RELEASE_VERSION: ${{ steps.resolve_tag.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+
+          if [ "${cargo_version}" != "${RELEASE_VERSION}" ]; then
+            echo "Cargo.toml version (${cargo_version}) does not match release tag (${RELEASE_VERSION})."
+            exit 1
+          fi
+
+          if ! grep -q "^## \[${RELEASE_VERSION}\]" CHANGELOG.md; then
+            echo "CHANGELOG.md is missing a ## [${RELEASE_VERSION}] entry."
+            exit 1
+          fi
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component rustfmt --component clippy
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install docs dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r docs/requirements.txt
+
+      - name: Install supply-chain tools
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
+        with:
+          tool: cargo-deny@0.19.0,cargo-audit@0.22.2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --all-features
+
+      - name: Docs
+        run: mkdocs build --strict
+
+      - name: Dependency policy
+        run: cargo deny check
+
+      - name: Security audit
+        run: cargo audit
+
+  build:
+    name: Build (${{ matrix.asset }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    needs: validate
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: linux-x86_64
+            ext: ""
+          - os: macos-26
+            target: aarch64-apple-darwin
+            asset: macos-arm64
+            ext: ""
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+            asset: macos-x86_64
+            ext: ""
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            asset: windows-x86_64
+            ext: ".exe"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.validate.outputs.release_tag }}
+
+      - name: Install Rust
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --target "${TARGET_TRIPLE}"
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Extract release notes
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          awk -v version="${RELEASE_VERSION}" '
+            index($0, "## [" version "]") == 1 { in_release=1; next }
+            /^## \[/ && in_release { exit }
+            in_release { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "Failed to extract release notes for ${RELEASE_VERSION} from CHANGELOG.md."
+            exit 1
+          fi
+
+      - name: Build release binary
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: cargo build --locked --release --all-features --target "${TARGET_TRIPLE}"
+
+      - name: Package
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+          ASSET_NAME: ${{ matrix.asset }}
+          BIN_EXT: ${{ matrix.ext }}
+        run: |
+          set -euo pipefail
+          bin="target/${TARGET_TRIPLE}/release/time-keep${BIN_EXT}"
+          package_dir="dist/time-keep-${ASSET_NAME}"
+          mkdir -p "${package_dir}"
+          cp "${bin}" "${package_dir}/"
+          cp README.md LICENSE CHANGELOG.md "${package_dir}/"
+
+          tar -C dist -czf "time-keep-${ASSET_NAME}.tar.gz" "time-keep-${ASSET_NAME}"
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "time-keep-${ASSET_NAME}.tar.gz" > "time-keep-${ASSET_NAME}.sha256"
+          else
+            sha256sum "time-keep-${ASSET_NAME}.tar.gz" > "time-keep-${ASSET_NAME}.sha256"
+          fi
+
+      - name: Smoke packaged artifact
+        shell: bash
+        env:
+          ASSET_NAME: ${{ matrix.asset }}
+          BIN_EXT: ${{ matrix.ext }}
+        run: |
+          set -euo pipefail
+          smoke_dir="$(mktemp -d)"
+          tar -xzf "time-keep-${ASSET_NAME}.tar.gz" -C "${smoke_dir}"
+          bin="${smoke_dir}/time-keep-${ASSET_NAME}/time-keep${BIN_EXT}"
+          if [ "${BIN_EXT}" = ".exe" ]; then
+            test -f "${bin}"
+          else
+            test -x "${bin}"
+          fi
+
+          "${bin}" --version
+          "${bin}" now --tz UTC
+          "${bin}" completions zsh > "${smoke_dir}/time-keep.zsh"
+          test -s "${smoke_dir}/time-keep.zsh"
+
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"release-smoke","version":"0.0.0"}}}' \
+            '{"jsonrpc":"2.0","id":"tools","method":"tools/list"}' \
+            | "${bin}" server start --transport stdio > "${smoke_dir}/mcp-stdio.jsonl"
+          grep -q '"current_time"' "${smoke_dir}/mcp-stdio.jsonl"
+
+          "${bin}" server start --transport streamable-http --http-host 127.0.0.1 --http-port 8769 > "${smoke_dir}/mcp-http.log" 2>&1 &
+          server_pid="$!"
+          trap 'kill "${server_pid}" 2>/dev/null || true' EXIT
+
+          for _attempt in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:8769/healthz" >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          curl -fsS "http://127.0.0.1:8769/readyz" >/dev/null
+          curl -fsS \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":"tools","method":"tools/list"}' \
+            "http://127.0.0.1:8769/mcp" > "${smoke_dir}/mcp-http.json"
+          grep -q '"current_time"' "${smoke_dir}/mcp-http.json"
+
+          kill "${server_pid}" 2>/dev/null || true
+          wait "${server_pid}" 2>/dev/null || true
+          trap - EXIT
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: time-keep-${{ matrix.asset }}.sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate release provenance
+        shell: bash
+        env:
+          ASSET_NAME: ${{ matrix.asset }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          digest_file() {
+            if command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 "$1" | awk '{ print $1 }'
+            else
+              sha256sum "$1" | awk '{ print $1 }'
+            fi
+          }
+
+          archive="time-keep-${ASSET_NAME}.tar.gz"
+          checksum="time-keep-${ASSET_NAME}.sha256"
+          sbom="time-keep-${ASSET_NAME}.sbom.spdx.json"
+          provenance="time-keep-${ASSET_NAME}.provenance.json"
+          commit_sha="$(git rev-parse HEAD)"
+
+          cat > "${provenance}" <<JSON
+          {
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [
+              {
+                "name": "${archive}",
+                "digest": {
+                  "sha256": "$(digest_file "${archive}")"
+                }
+              },
+              {
+                "name": "${checksum}",
+                "digest": {
+                  "sha256": "$(digest_file "${checksum}")"
+                }
+              },
+              {
+                "name": "${sbom}",
+                "digest": {
+                  "sha256": "$(digest_file "${sbom}")"
+                }
+              }
+            ],
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "predicate": {
+              "buildDefinition": {
+                "buildType": "https://github.com/joe-broadhead/time-keep/.github/workflows/release.yml",
+                "externalParameters": {
+                  "asset": "${ASSET_NAME}",
+                  "releaseTag": "${RELEASE_TAG}",
+                  "releaseVersion": "${RELEASE_VERSION}",
+                  "targetTriple": "${TARGET_TRIPLE}"
+                },
+                "internalParameters": {
+                  "githubRunAttempt": "${GITHUB_RUN_ATTEMPT}",
+                  "githubRunId": "${GITHUB_RUN_ID}",
+                  "workflow": ".github/workflows/release.yml"
+                },
+                "resolvedDependencies": [
+                  {
+                    "uri": "git+https://github.com/${GITHUB_REPOSITORY}.git@${RELEASE_TAG}",
+                    "digest": {
+                      "gitCommit": "${commit_sha}"
+                    },
+                    "name": "${GITHUB_REPOSITORY}"
+                  }
+                ]
+              },
+              "runDetails": {
+                "builder": {
+                  "id": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+                },
+                "metadata": {
+                  "invocationId": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+                }
+              }
+            }
+          }
+          JSON
+
+      - name: Publish GitHub build attestation
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@b3e506e8c389afc651c5bacf2b8f2a1ea0557215 # v4
+        with:
+          subject-path: |
+            time-keep-${{ matrix.asset }}.tar.gz
+            time-keep-${{ matrix.asset }}.sha256
+            time-keep-${{ matrix.asset }}.sbom.spdx.json
+            time-keep-${{ matrix.asset }}.provenance.json
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: time-keep-${{ matrix.asset }}
+          path: |
+            time-keep-${{ matrix.asset }}.tar.gz
+            time-keep-${{ matrix.asset }}.sha256
+            time-keep-${{ matrix.asset }}.sbom.spdx.json
+            time-keep-${{ matrix.asset }}.provenance.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish Release
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    needs:
+      - validate
+      - build
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.validate.outputs.release_tag }}
+
+      - name: Extract release notes
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          awk -v version="${RELEASE_VERSION}" '
+            index($0, "## [" version "]") == 1 { in_release=1; next }
+            /^## \[/ && in_release { exit }
+            in_release { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "Failed to extract release notes for ${RELEASE_VERSION} from CHANGELOG.md."
+            exit 1
+          fi
+
+      - name: Download release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release-assets
+          pattern: time-keep-*
+          merge-multiple: true
+
+      - name: Verify complete asset set
+        run: |
+          set -euo pipefail
+          expected_assets=(
+            linux-x86_64
+            macos-arm64
+            macos-x86_64
+            windows-x86_64
+          )
+
+          for asset in "${expected_assets[@]}"; do
+            test -s "release-assets/time-keep-${asset}.tar.gz"
+            test -s "release-assets/time-keep-${asset}.sha256"
+            test -s "release-assets/time-keep-${asset}.sbom.spdx.json"
+            test -s "release-assets/time-keep-${asset}.provenance.json"
+          done
+
+      - name: Smoke installer from release assets
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          smoke_dir="$(mktemp -d)"
+          mkdir -p "${smoke_dir}/download/${RELEASE_TAG}"
+          cp release-assets/time-keep-linux-x86_64.tar.gz "${smoke_dir}/download/${RELEASE_TAG}/"
+          cp release-assets/time-keep-linux-x86_64.sha256 "${smoke_dir}/download/${RELEASE_TAG}/"
+
+          TIME_KEEP_VERSION="${RELEASE_TAG}" \
+            TIME_KEEP_RELEASE_BASE_URL="file://${smoke_dir}" \
+            TIME_KEEP_INSTALL_DIR="${smoke_dir}/bin" \
+            TIME_KEEP_INSTALL_NONINTERACTIVE=1 \
+            TIME_KEEP_INSTALL_COMPLETIONS=1 \
+            TIME_KEEP_COMPLETION_SHELL=zsh \
+            TIME_KEEP_COMPLETIONS_DIR="${smoke_dir}/completions" \
+            scripts/install.sh
+
+          bin="${smoke_dir}/bin/time-keep"
+          test -x "${bin}"
+          test -s "${smoke_dir}/completions/_time-keep"
+
+          "${bin}" --version
+          "${bin}" now --tz UTC
+
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"release-installer-smoke","version":"0.0.0"}}}' \
+            '{"jsonrpc":"2.0","id":"tools","method":"tools/list"}' \
+            | "${bin}" server start --transport stdio > "${smoke_dir}/mcp-stdio.jsonl"
+          grep -q '"current_time"' "${smoke_dir}/mcp-stdio.jsonl"
+
+          "${bin}" server start --transport streamable-http --http-host 127.0.0.1 --http-port 8770 > "${smoke_dir}/mcp-http.log" 2>&1 &
+          server_pid="$!"
+          trap 'kill "${server_pid}" 2>/dev/null || true' EXIT
+
+          for _attempt in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:8770/healthz" >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          curl -fsS "http://127.0.0.1:8770/readyz" >/dev/null
+          curl -fsS \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":"tools","method":"tools/list"}' \
+            "http://127.0.0.1:8770/mcp" > "${smoke_dir}/mcp-http.json"
+          grep -q '"current_time"' "${smoke_dir}/mcp-http.json"
+
+          kill "${server_pid}" 2>/dev/null || true
+          wait "${server_pid}" 2>/dev/null || true
+          trap - EXIT
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ needs.validate.outputs.release_tag }}
+          name: ${{ needs.validate.outputs.release_tag }}
+          body_path: RELEASE_NOTES.md
+          files: release-assets/*

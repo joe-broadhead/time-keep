@@ -1,0 +1,16 @@
+/target/
+/site/
+/.idea/
+/.vscode/
+/.DS_Store
+*.swp
+*.swo
+*.tmp
+*.log
+
+# Local runtime data and config. Examples belong in docs or fixtures.
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal

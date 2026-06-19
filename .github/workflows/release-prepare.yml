@@ -1,0 +1,107 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (for example: 0.0.0)"
+        required: true
+        default: "0.0.0"
+        type: string
+      base_branch:
+        description: "Base branch for the release PR"
+        required: true
+        default: "master"
+        type: choice
+        options:
+          - master
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Verify release PR token
+        env:
+          RELEASE_PR_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
+        run: |
+          if [ -z "${RELEASE_PR_TOKEN}" ]; then
+            echo "Missing secret RELEASE_PR_TOKEN."
+            echo "Set it to a PAT or GitHub App token with contents:write and pull-requests:write."
+            echo "The default GITHUB_TOKEN suppresses the CI and PR workflows this release branch must run."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PR_TOKEN }}
+
+      - name: Validate release metadata
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must be in semantic x.y.z format (for example: 0.0.0)."
+            exit 1
+          fi
+
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [ "${cargo_version}" != "${VERSION}" ]; then
+            echo "Cargo.toml version (${cargo_version}) does not match requested release version (${VERSION})."
+            exit 1
+          fi
+
+          if ! grep -q "^## \[${VERSION}\]" CHANGELOG.md; then
+            echo "CHANGELOG.md is missing a ## [${VERSION}] entry."
+            exit 1
+          fi
+
+      - name: Create release branch
+        env:
+          VERSION: ${{ inputs.version }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          set -euo pipefail
+          git fetch origin "${BASE_BRANCH}"
+          git checkout "${BASE_BRANCH}"
+          git pull --ff-only origin "${BASE_BRANCH}"
+
+          branch="release/${VERSION}"
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            echo "Release branch already exists: ${branch}"
+            exit 0
+          fi
+
+          git checkout -b "${branch}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "release: v${VERSION}"
+          git push origin "${branch}"
+
+      - name: Open release PR
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          set -euo pipefail
+          branch="release/${VERSION}"
+          existing="$(gh pr list --state open --base "${BASE_BRANCH}" --head "${branch}" --json number --jq 'length')"
+
+          if [ "${existing}" -gt 0 ]; then
+            echo "Release PR already exists."
+            exit 0
+          fi
+
+          gh pr create \
+            --title "release: v${VERSION}" \
+            --head "${branch}" \
+            --base "${BASE_BRANCH}" \
+            --body "Release branch for v${VERSION}. Merge into ${BASE_BRANCH} to tag and publish."

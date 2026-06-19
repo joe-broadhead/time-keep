@@ -1,0 +1,32 @@
+[package]
+name = "time-keep"
+version = "0.0.0"
+rust-version = "1.93"
+edition = "2024"
+description = "Agent clock MCP server and CLI. Current time, timezone ops, calendar queries, business days, timers, and holiday lookups."
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/joe-broadhead/time-keep"
+homepage = "https://github.com/joe-broadhead/time-keep"
+documentation = "https://joe-broadhead.github.io/time-keep/"
+keywords = ["time", "timezone", "calendar", "mcp", "cli"]
+categories = ["command-line-utilities", "date-and-time"]
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
+[dependencies]
+chrono = { version = "0.4.45", features = ["clock", "serde"] }
+chrono-tz = { version = "0.10.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+comfy-table = "7"
+ctrlc = { version = "3", features = ["termination"] }
+csv = "1"
+holidays = "0.1.0"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

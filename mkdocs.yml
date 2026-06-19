@@ -1,0 +1,117 @@
+site_name: time-keep
+site_description: Local-first agent clock CLI and MCP server for time, timezones, calendars, business days, holidays, and timers.
+site_url: https://joe-broadhead.github.io/time-keep/
+repo_url: https://github.com/joe-broadhead/time-keep
+repo_name: time-keep
+edit_uri: edit/master/docs/
+strict: true
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+plugins:
+  - search
+  - minify:
+      minify_html: true
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/joe-broadhead/time-keep
+  generator: false
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - https://unpkg.com/mermaid@10.9.0/dist/mermaid.min.js
+  - javascripts/mermaid-init.js
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Quickstart: getting-started/quickstart.md
+      - Installation: getting-started/installation.md
+      - MCP Clients: getting-started/mcp-clients.md
+  - Reference:
+      - CLI Reference: reference/cli.md
+      - MCP Reference: reference/mcp.md
+      - Calendar & Dates: reference/calendar-date.md
+      - Timers: reference/timers.md
+      - Output, Config & Paths: reference/output-config.md
+  - Operations:
+      - Troubleshooting: operations/troubleshooting.md
+      - Security: operations/security.md
+  - Development:
+      - Contributing: development/contributing.md
+      - Agent Skills: development/agent-skills.md
+      - Release: development/release.md
+      - Production Readiness Audit: development/production-readiness-audit-v0.0.0.md
+      - Linear Plan: development/linear-v0.0.0.md
+      - Product Contract: development/product-contract.md
+      - Repo Conventions: development/repo-conventions.md
+      - Release Policy: development/release-policy.md

@@ -1,0 +1,92 @@
+name: Tag Release
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - master
+
+jobs:
+  tag:
+    if: >
+      github.event.pull_request.merged == true &&
+      (startsWith(github.event.pull_request.head.ref, 'release/') ||
+       startsWith(github.event.pull_request.head.ref, 'hotfix/'))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Verify release tag token
+        env:
+          RELEASE_TAG_TOKEN: ${{ secrets.RELEASE_TAG_TOKEN }}
+        run: |
+          if [ -z "${RELEASE_TAG_TOKEN}" ]; then
+            echo "Missing secret RELEASE_TAG_TOKEN."
+            echo "Set it to a PAT or GitHub App token with contents:write so tag pushes trigger release workflows."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TAG_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Validate release branch metadata
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          version_raw="${BRANCH#*/}"
+          if ! [[ "${version_raw}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release branch: expected release/X.Y.Z, release/vX.Y.Z, hotfix/X.Y.Z, or hotfix/vX.Y.Z (${BRANCH})."
+            exit 1
+          fi
+
+          version="${version_raw#v}"
+          if [ -z "${MERGE_SHA}" ]; then
+            echo "Missing merge commit SHA."
+            exit 1
+          fi
+          git checkout --detach "${MERGE_SHA}"
+
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [ "${cargo_version}" != "${version}" ]; then
+            echo "Cargo.toml version (${cargo_version}) does not match release branch version (${version})."
+            exit 1
+          fi
+
+          if ! grep -q "^## \[${version}\]" CHANGELOG.md; then
+            echo "CHANGELOG.md is missing a ## [${version}] entry."
+            exit 1
+          fi
+
+      - name: Create and push tag
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          version_raw="${BRANCH#*/}"
+          if ! [[ "${version_raw}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release branch: ${BRANCH}."
+            exit 1
+          fi
+          version="${version_raw#v}"
+          tag="v${version}"
+
+          if git rev-parse "${tag}" >/dev/null 2>&1; then
+            echo "Tag already exists: ${tag}"
+            exit 0
+          fi
+
+          git tag -a "${tag}" "${MERGE_SHA}" -m "Release ${tag}"
+          git push origin "${tag}"
