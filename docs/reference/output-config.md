@@ -75,11 +75,14 @@ default_timezone = "system"
 The default is resolved with the following precedence (highest first):
 
 1. Explicit `--tz` flags on `now` (or the `timezones` argument to
-   `current_time`).
+   `current_time`, including an explicit empty list, which means UTC).
 2. The `TIME_KEEP_TZ` environment variable. Accepts a single IANA name, a
    comma-separated list, or the `system`/`local` token.
 3. `default_timezones`, then `default_timezone`, from `config.toml`.
 4. UTC.
+
+`TIME_KEEP_TZ` is consulted before the config file is read, so a valid
+environment override works even when the config file is invalid.
 
 Only IANA timezone names are accepted. An invalid name, or a `system` token that
 cannot be resolved, produces a structured `INVALID_PARAMS` error rather than a
@@ -89,6 +92,21 @@ silent fallback. `TIME_KEEP_TZ` is handy for one-off overrides:
 TIME_KEEP_TZ=Europe/Amsterdam time-keep now
 TIME_KEEP_TZ=system time-keep now
 ```
+
+Scoping and resilience:
+
+- Only the commands that use the default read the config file: `now` without
+  `--tz`, and the `current_time` MCP tool without a `timezones` argument. A
+  broken config never blocks `config path`, timers, calendar, holiday, or
+  business-day commands.
+- Unknown config keys are ignored with a warning, so configs written for other
+  time-keep versions keep working.
+- The MCP server starts even when the configured default is invalid: it prints
+  a warning at startup, and only `current_time` calls that rely on the default
+  return the structured error.
+- Defaults are re-resolved on every call, so a long-running MCP server picks up
+  config edits and operating-system timezone changes (the `system` token)
+  without a restart.
 
 ## Data Path
 

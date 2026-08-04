@@ -5,6 +5,11 @@
 //! the caller does not pass an explicit timezone. Zero-config behavior is
 //! unchanged: with no config and no relevant environment variable, the default
 //! remains UTC.
+//!
+//! The file is only read by the code paths that use the default, so a broken
+//! config never blocks unrelated commands. Unknown keys are ignored with a
+//! warning so configs written for newer versions keep working on older
+//! binaries (and vice versa).
 
 use std::path::Path;
 
@@ -22,12 +27,14 @@ use crate::{
 /// `system` (alias `local`) to detect the operating-system timezone.
 pub(crate) const DEFAULT_TZ_ENV: &str = "TIME_KEEP_TZ";
 
-/// Token that opts in to operating-system timezone detection.
+/// Tokens that opt in to operating-system timezone detection.
 const SYSTEM_TOKENS: [&str; 2] = ["system", "local"];
+
+/// Keys this version of time-keep understands in `config.toml`.
+const KNOWN_KEYS: [&str; 2] = ["default_timezone", "default_timezones"];
 
 /// Parsed `config.toml` contents. All fields are optional.
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Config {
     /// Single default timezone. Ignored when `default_timezones` is non-empty.
     #[serde(default)]
@@ -40,21 +47,36 @@ pub(crate) struct Config {
 
 impl Config {
     /// Load a config file if it exists. A missing file yields the default
-    /// (empty) config; a present-but-invalid file is a hard error so
-    /// misconfiguration is visible rather than silently ignored.
+    /// (empty) config. A present-but-unparseable file is a hard error so
+    /// misconfiguration is visible rather than silently ignored, while unknown
+    /// keys only warn, keeping configs portable across versions.
     pub(crate) fn load(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(contents) => toml::from_str(&contents).map_err(|err| {
-                TimeKeepError::invalid_params(format!(
-                    "failed to parse config file {}: {err}",
-                    path.display()
-                ))
-                .with_detail("config_path", serde_json::json!(path.display().to_string()))
-            }),
+            Ok(contents) => Self::parse(&contents, path),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => Err(TimeKeepError::from(err)
                 .with_detail("config_path", serde_json::json!(path.display().to_string()))),
         }
+    }
+
+    fn parse(contents: &str, path: &Path) -> Result<Self> {
+        let parse_error = |err: toml::de::Error| {
+            TimeKeepError::invalid_params(format!(
+                "failed to parse config file {}: {err}",
+                path.display()
+            ))
+            .with_detail("config_path", serde_json::json!(path.display().to_string()))
+        };
+        let table: toml::Table = toml::from_str(contents).map_err(parse_error)?;
+        for key in table.keys() {
+            if !KNOWN_KEYS.contains(&key.as_str()) {
+                tracing::warn!(
+                    "ignoring unknown key \"{key}\" in config file {}",
+                    path.display()
+                );
+            }
+        }
+        table.try_into().map_err(parse_error)
     }
 
     /// The raw configured timezone tokens, list taking precedence over the
@@ -70,29 +92,58 @@ impl Config {
     }
 }
 
-/// Resolve the default timezones for `now` / `current_time`, applying the
-/// precedence: `TIME_KEEP_TZ` environment variable, then config file, then an
-/// empty result (which callers treat as UTC).
+/// Resolve the default timezones for `now` / `current_time` from the
+/// environment and the config file at `config_path`, applying the precedence:
+/// `TIME_KEEP_TZ` environment variable, then config file, then an empty result
+/// (which callers treat as UTC).
 ///
+/// The environment is consulted first and short-circuits, so a valid
+/// `TIME_KEEP_TZ` works even when the config file is unreadable or invalid.
 /// Explicit `--tz` flags and MCP `timezones` arguments are handled by callers
 /// and always win over these defaults. The returned names are validated IANA
 /// timezones with any `system`/`local` token already expanded.
-pub(crate) fn resolve_default_timezones(config: &Config) -> Result<Vec<String>> {
-    if let Some(raw) = env_tokens() {
+pub(crate) fn default_timezones_from(config_path: &Path) -> Result<Vec<String>> {
+    resolve_from_parts(
+        parse_env_value(std::env::var_os(DEFAULT_TZ_ENV))?.as_deref(),
+        || Config::load(config_path),
+    )
+}
+
+/// Pure resolution logic with the environment value and config loader
+/// injected, so tests never depend on (or mutate) the live process
+/// environment. The loader only runs when the environment yields nothing.
+fn resolve_from_parts(
+    env_value: Option<&str>,
+    load_config: impl FnOnce() -> Result<Config>,
+) -> Result<Vec<String>> {
+    if let Some(raw) = env_tokens(env_value) {
         return resolve_tokens(&raw, TokenSource::Env);
     }
-    let configured = config.configured_tokens();
+    let configured = load_config()?.configured_tokens();
     if !configured.is_empty() {
         return resolve_tokens(&configured, TokenSource::Config);
     }
     Ok(Vec::new())
 }
 
-/// Read and split the `TIME_KEEP_TZ` environment variable into tokens. Returns
-/// `None` when unset or empty (so config can take over).
-fn env_tokens() -> Option<Vec<String>> {
-    let raw = std::env::var(DEFAULT_TZ_ENV).ok()?;
-    let tokens = split_tokens(&raw);
+/// Convert the raw environment value into a string, rejecting non-UTF-8 bytes
+/// explicitly instead of silently treating them as unset.
+fn parse_env_value(value: Option<std::ffi::OsString>) -> Result<Option<String>> {
+    match value {
+        None => Ok(None),
+        Some(os_value) => os_value.into_string().map(Some).map_err(|_| {
+            TimeKeepError::invalid_params(format!(
+                "{DEFAULT_TZ_ENV} contains invalid UTF-8 and cannot be used"
+            ))
+            .with_detail("source", serde_json::json!(DEFAULT_TZ_ENV))
+        }),
+    }
+}
+
+/// Split a `TIME_KEEP_TZ` value into tokens. Returns `None` when unset or
+/// blank (so config can take over).
+fn env_tokens(env_value: Option<&str>) -> Option<Vec<String>> {
+    let tokens = split_tokens(env_value?);
     (!tokens.is_empty()).then_some(tokens)
 }
 
@@ -146,7 +197,11 @@ mod tests {
     use super::*;
 
     fn config(toml_str: &str) -> Config {
-        toml::from_str(toml_str).expect("valid test config")
+        Config::parse(toml_str, Path::new("/test/config.toml")).expect("valid test config")
+    }
+
+    fn no_config() -> Result<Config> {
+        Ok(Config::default())
     }
 
     #[test]
@@ -155,6 +210,26 @@ mod tests {
             .expect("missing file is not an error");
         assert!(cfg.default_timezone.is_none());
         assert!(cfg.default_timezones.is_empty());
+    }
+
+    #[test]
+    fn unknown_keys_are_tolerated() {
+        let cfg = config("future_setting = true\ndefault_timezone = \"Europe/Amsterdam\"\n");
+        assert_eq!(cfg.default_timezone.as_deref(), Some("Europe/Amsterdam"));
+    }
+
+    #[test]
+    fn invalid_toml_is_error() {
+        let err = Config::parse("not valid toml [", Path::new("/test/config.toml"))
+            .expect_err("syntax error should fail");
+        assert_eq!(err.code().as_str(), "INVALID_PARAMS");
+    }
+
+    #[test]
+    fn wrong_value_type_is_error() {
+        let err = Config::parse("default_timezone = 5\n", Path::new("/test/config.toml"))
+            .expect_err("type error should fail");
+        assert_eq!(err.code().as_str(), "INVALID_PARAMS");
     }
 
     #[test]
@@ -171,30 +246,84 @@ mod tests {
     #[test]
     fn singular_default_is_used_when_no_list() {
         let cfg = config("default_timezone = \"Europe/Amsterdam\"\n");
-        let resolved = resolve_tokens(&cfg.configured_tokens(), TokenSource::Config)
-            .expect("valid configured timezone");
+        let resolved = resolve_from_parts(None, || Ok(cfg)).expect("valid configured timezone");
         assert_eq!(resolved, vec!["Europe/Amsterdam".to_string()]);
     }
 
     #[test]
     fn empty_config_resolves_to_empty() {
-        let resolved = resolve_default_timezones(&Config::default()).expect("empty is ok");
+        let resolved = resolve_from_parts(None, no_config).expect("empty is ok");
         assert!(resolved.is_empty());
     }
 
     #[test]
-    fn invalid_configured_timezone_is_error() {
-        let cfg = config("default_timezone = \"Mars/Olympus\"\n");
-        let err = resolve_tokens(&cfg.configured_tokens(), TokenSource::Config)
-            .expect_err("bogus timezone should fail");
+    fn env_overrides_config() {
+        let resolved = resolve_from_parts(Some("Asia/Tokyo,UTC"), || {
+            Ok(config("default_timezone = \"Europe/Amsterdam\"\n"))
+        })
+        .expect("valid env timezones");
+        assert_eq!(resolved, vec!["Asia/Tokyo".to_string(), "UTC".to_string()]);
+    }
+
+    #[test]
+    fn env_wins_without_touching_broken_config() {
+        // The loader fails hard; a valid env value must short-circuit it.
+        let resolved = resolve_from_parts(Some("Asia/Tokyo"), || {
+            Err(TimeKeepError::invalid_params("must not be called"))
+        })
+        .expect("env short-circuits config loading");
+        assert_eq!(resolved, vec!["Asia/Tokyo".to_string()]);
+    }
+
+    #[test]
+    fn blank_env_falls_back_to_config() {
+        for blank in ["", "  ", ","] {
+            let resolved = resolve_from_parts(Some(blank), || {
+                Ok(config("default_timezone = \"Europe/Amsterdam\"\n"))
+            })
+            .expect("blank env is treated as unset");
+            assert_eq!(resolved, vec!["Europe/Amsterdam".to_string()]);
+        }
+    }
+
+    #[test]
+    fn invalid_env_timezone_is_error_not_fallback() {
+        let err = resolve_from_parts(Some("Mars/Olympus"), no_config)
+            .expect_err("bogus env timezone should fail, not fall back to config");
+        assert_eq!(err.code().as_str(), "INVALID_PARAMS");
+        assert_eq!(
+            err.details().get("source"),
+            Some(&serde_json::json!(DEFAULT_TZ_ENV))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_env_value_is_explicit_error() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let err = parse_env_value(Some(std::ffi::OsString::from_vec(vec![0xFF, 0xFE])))
+            .expect_err("non-UTF-8 env must error, not silently fall back");
         assert_eq!(err.code().as_str(), "INVALID_PARAMS");
     }
 
     #[test]
-    fn unknown_config_key_is_rejected() {
-        let err = toml::from_str::<Config>("default_tz = \"UTC\"\n")
-            .expect_err("unknown key should fail");
-        assert!(err.to_string().contains("default_tz") || err.to_string().contains("unknown"));
+    fn valid_env_value_passes_through() {
+        let value = parse_env_value(Some(std::ffi::OsString::from("Europe/Amsterdam")))
+            .expect("valid UTF-8");
+        assert_eq!(value.as_deref(), Some("Europe/Amsterdam"));
+        assert_eq!(parse_env_value(None).expect("unset is ok"), None);
+    }
+
+    #[test]
+    fn invalid_configured_timezone_is_error() {
+        let err = resolve_from_parts(None, || Ok(config("default_timezone = \"Mars/Olympus\"\n")))
+            .expect_err("bogus timezone should fail");
+        assert_eq!(err.code().as_str(), "INVALID_PARAMS");
+        assert_eq!(
+            err.details().get("source"),
+            Some(&serde_json::json!("config"))
+        );
     }
 
     #[test]

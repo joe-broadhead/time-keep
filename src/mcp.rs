@@ -78,9 +78,18 @@ const HEADER_LINE_LIMIT_BYTES: usize = 8 * 1024;
 const BODY_LIMIT_BYTES: usize = 1_048_576;
 
 pub(crate) fn run_server(app: &App, args: &ServerStartArgs) -> Result<()> {
+    // Surface a misconfigured default visibly at startup, but never refuse to
+    // boot over it: only current_time calls that rely on the default are
+    // affected, and the other tools (timers, holidays, calendar) must stay
+    // available. The failing calls return the same structured error.
+    if let Err(err) = app.default_timezones() {
+        eprintln!(
+            "warning: default timezone configuration is invalid; current_time calls that rely on it will fail: {err}"
+        );
+    }
     let runtime = Arc::new(McpRuntime::new(
         app.data_dir().to_path_buf(),
-        app.default_timezones().to_vec(),
+        DefaultTimezones::FromConfig(app.config_path().to_path_buf()),
     ));
     match args.transport {
         Transport::Stdio => run_stdio(runtime),
@@ -88,14 +97,27 @@ pub(crate) fn run_server(app: &App, args: &ServerStartArgs) -> Result<()> {
     }
 }
 
+/// Where `current_time` gets its default timezones when the caller omits the
+/// `timezones` argument.
+#[derive(Debug)]
+enum DefaultTimezones {
+    /// Resolve from `TIME_KEEP_TZ` and the config file on every call, so a
+    /// long-running server picks up config edits and OS timezone changes
+    /// (`system` token) without a restart.
+    FromConfig(PathBuf),
+    /// Fixed defaults for hermetic protocol tests.
+    #[cfg(test)]
+    Fixed(Vec<String>),
+}
+
 #[derive(Debug)]
 struct McpRuntime {
     data_dir: PathBuf,
-    default_timezones: Vec<String>,
+    default_timezones: DefaultTimezones,
 }
 
 impl McpRuntime {
-    fn new(data_dir: PathBuf, default_timezones: Vec<String>) -> Self {
+    fn new(data_dir: PathBuf, default_timezones: DefaultTimezones) -> Self {
         Self {
             data_dir,
             default_timezones,
@@ -106,12 +128,14 @@ impl McpRuntime {
         TimerStore::open(timer_db_path(&self.data_dir))
     }
 
-    /// Timezones to report when a `current_time` call omits `timezones`.
-    fn now_timezones(&self, requested: Vec<String>) -> Vec<String> {
-        if requested.is_empty() {
-            self.default_timezones.clone()
-        } else {
-            requested
+    /// Default timezones for a `current_time` call that omits `timezones`.
+    fn default_timezones(&self) -> Result<Vec<String>> {
+        match &self.default_timezones {
+            DefaultTimezones::FromConfig(config_path) => {
+                crate::config::default_timezones_from(config_path)
+            }
+            #[cfg(test)]
+            DefaultTimezones::Fixed(timezones) => Ok(timezones.clone()),
         }
     }
 }
@@ -581,8 +605,13 @@ fn call_tool(runtime: &McpRuntime, name: &str, args: &Map<String, Value>) -> Res
 
     match name {
         "current_time" => {
-            let requested = optional_string_array(args, "timezones")?.unwrap_or_default();
-            let timezones = runtime.now_timezones(requested);
+            // An explicit `timezones` argument always wins, including an
+            // explicit empty array (the documented "defaults to UTC" shape).
+            // Only an omitted argument falls back to the configured default.
+            let timezones = match optional_string_array(args, "timezones")? {
+                Some(requested) => requested,
+                None => runtime.default_timezones()?,
+            };
             let format = parse_time_format(optional_string(args, "format")?.as_deref())?;
             serde_json::to_value(timezones::current_time(&timezones, format)?).map_err(Into::into)
         }
@@ -1209,7 +1238,10 @@ mod tests {
 
     #[test]
     fn mcp_protocol_lists_exact_tool_names() {
-        let runtime = Arc::new(McpRuntime::new(temp_data_dir("list"), Vec::new()));
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir("list"),
+            test_defaults(Vec::new()),
+        ));
         let response = handle_jsonrpc_text(
             &runtime,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
@@ -1227,7 +1259,7 @@ mod tests {
     fn mcp_protocol_rejects_missing_jsonrpc_version() {
         let runtime = Arc::new(McpRuntime::new(
             temp_data_dir("missing-jsonrpc"),
-            Vec::new(),
+            test_defaults(Vec::new()),
         ));
         let response =
             handle_jsonrpc_text(&runtime, r#"{"id":1,"method":"tools/list"}"#).expect("response");
@@ -1239,7 +1271,10 @@ mod tests {
 
     #[test]
     fn mcp_protocol_batches_responses_and_skips_notifications() {
-        let runtime = Arc::new(McpRuntime::new(temp_data_dir("batch"), Vec::new()));
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir("batch"),
+            test_defaults(Vec::new()),
+        ));
         let response = handle_jsonrpc_text(
             &runtime,
             r#"[
@@ -1260,7 +1295,10 @@ mod tests {
 
     #[test]
     fn mcp_protocol_calls_current_time() {
-        let runtime = Arc::new(McpRuntime::new(temp_data_dir("current-time"), Vec::new()));
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir("current-time"),
+            test_defaults(Vec::new()),
+        ));
         let response = handle_jsonrpc_text(
             &runtime,
             r#"{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"current_time","arguments":{"timezones":["UTC"],"format":"rfc3339"}}}"#,
@@ -1279,7 +1317,7 @@ mod tests {
     fn mcp_current_time_uses_configured_default_when_timezones_omitted() {
         let runtime = Arc::new(McpRuntime::new(
             temp_data_dir("current-time-default"),
-            vec!["Europe/Amsterdam".to_string()],
+            test_defaults(vec!["Europe/Amsterdam".to_string()]),
         ));
         let response = handle_jsonrpc_text(
             &runtime,
@@ -1295,10 +1333,31 @@ mod tests {
     }
 
     #[test]
+    fn mcp_current_time_explicit_empty_array_means_utc_not_default() {
+        // The pre-existing contract: an explicit `timezones: []` pins UTC.
+        // It must not be conflated with an omitted argument.
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir("current-time-explicit-empty"),
+            test_defaults(vec!["Europe/Amsterdam".to_string()]),
+        ));
+        let response = handle_jsonrpc_text(
+            &runtime,
+            r#"{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"current_time","arguments":{"timezones":[]}}}"#,
+        )
+        .expect("response");
+        assert_eq!(response["result"]["isError"], false);
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text result");
+        let payload: Value = serde_json::from_str(text).expect("tool payload");
+        assert_eq!(payload["times"][0]["timezone"], "UTC");
+    }
+
+    #[test]
     fn mcp_current_time_explicit_timezone_overrides_default() {
         let runtime = Arc::new(McpRuntime::new(
             temp_data_dir("current-time-override"),
-            vec!["Europe/Amsterdam".to_string()],
+            test_defaults(vec!["Europe/Amsterdam".to_string()]),
         ));
         let response = handle_jsonrpc_text(
             &runtime,
@@ -1316,7 +1375,7 @@ mod tests {
     fn mcp_current_time_defaults_to_utc_without_configuration() {
         let runtime = Arc::new(McpRuntime::new(
             temp_data_dir("current-time-utc"),
-            Vec::new(),
+            test_defaults(Vec::new()),
         ));
         let response = handle_jsonrpc_text(
             &runtime,
@@ -1332,7 +1391,10 @@ mod tests {
 
     #[test]
     fn mcp_protocol_returns_structured_tool_error() {
-        let runtime = Arc::new(McpRuntime::new(temp_data_dir("tool-error"), Vec::new()));
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir("tool-error"),
+            test_defaults(Vec::new()),
+        ));
         let response = handle_jsonrpc_text(
             &runtime,
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"timezone_info","arguments":{"timezone":"Madrid"}}}"#,
@@ -1351,7 +1413,7 @@ mod tests {
     fn mcp_protocol_rejects_unknown_tool_argument() {
         let runtime = Arc::new(McpRuntime::new(
             temp_data_dir("unknown-argument"),
-            Vec::new(),
+            test_defaults(Vec::new()),
         ));
         let response = handle_jsonrpc_text(
             &runtime,
@@ -1409,7 +1471,7 @@ mod tests {
     fn mcp_protocol_timer_tools_persist_in_runtime_data_dir() {
         let runtime = Arc::new(McpRuntime::new(
             temp_data_dir("timer-persistence"),
-            Vec::new(),
+            test_defaults(Vec::new()),
         ));
         let set = handle_jsonrpc_text(
             &runtime,
@@ -1477,5 +1539,13 @@ mod tests {
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
         path
+    }
+
+    /// Fixed defaults keep protocol tests hermetic: they never read the live
+    /// process environment or filesystem config. End-to-end config-file
+    /// behavior is covered in tests/scaffold_cli.rs with a controlled child
+    /// environment.
+    fn test_defaults(timezones: Vec<String>) -> DefaultTimezones {
+        DefaultTimezones::Fixed(timezones)
     }
 }

@@ -55,10 +55,10 @@ fn run(cli: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    let app = App::new(cli)?;
+    let app = App::new(cli);
     match &cli.command {
         Command::Now(args) => {
-            let zones = app.now_timezones(&args.timezones);
+            let zones = app.now_timezones(&args.timezones)?;
             let response = timezones::current_time(&zones, args.format)?;
             output::render(
                 cli.output_format(),

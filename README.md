@@ -186,10 +186,12 @@ change that default, set it in `config.toml`:
 
 ```toml
 default_timezone = "Europe/Madrid"
+
 # Or an ordered list, which takes precedence over the singular form:
-default_timezones = ["Europe/Madrid", "UTC"]
+# default_timezones = ["Europe/Madrid", "UTC"]
+
 # Or detect the operating-system timezone:
-default_timezone = "system"
+# default_timezone = "system"
 ```
 
 Resolution precedence (highest first): explicit `--tz` flags, then the

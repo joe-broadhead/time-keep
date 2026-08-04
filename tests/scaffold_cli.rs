@@ -125,8 +125,16 @@ fn csv_error_output_uses_stable_error_columns() {
 fn server_stdio_initializes_and_lists_tools() {
     let data_dir = temp_data_dir("server-stdio");
     let mut child = Command::new(binary())
-        .args(["server", "start", "--transport", "stdio"])
+        .args([
+            "--config",
+            "/nonexistent/time-keep/config.toml",
+            "server",
+            "start",
+            "--transport",
+            "stdio",
+        ])
         .env("TIME_KEEP_DATA_DIR", &data_dir)
+        .env_remove("TIME_KEEP_TZ")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -165,12 +173,208 @@ fn server_stdio_initializes_and_lists_tools() {
 }
 
 #[test]
+fn server_stdio_current_time_uses_config_default_timezone() {
+    let data_dir = temp_data_dir("server-stdio-config-default");
+    let config_path = data_dir.join("config.toml");
+    fs::write(&config_path, "default_timezone = \"Europe/Amsterdam\"\n").expect("write config");
+    let mut child = Command::new(binary())
+        .arg("--config")
+        .arg(&config_path)
+        .args(["server", "start", "--transport", "stdio"])
+        .env("TIME_KEEP_DATA_DIR", &data_dir)
+        .env_remove("TIME_KEEP_TZ")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn stdio server");
+
+    let mut stdin = child.stdin.take().expect("server stdin");
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"current_time","arguments":{{}}}}}}"#
+    )
+    .expect("write tools/call");
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"current_time","arguments":{{"timezones":["Asia/Tokyo"]}}}}}}"#
+    )
+    .expect("write explicit tools/call");
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for stdio server");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    let responses = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON-RPC line"))
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 2);
+
+    let default_payload: serde_json::Value = serde_json::from_str(
+        responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text result"),
+    )
+    .expect("tool payload");
+    assert_eq!(default_payload["times"][0]["timezone"], "Europe/Amsterdam");
+
+    let explicit_payload: serde_json::Value = serde_json::from_str(
+        responses[1]["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text result"),
+    )
+    .expect("tool payload");
+    assert_eq!(explicit_payload["times"][0]["timezone"], "Asia/Tokyo");
+}
+
+#[test]
+fn server_stdio_stays_up_with_invalid_config_default() {
+    // A broken timezone default must not take down the whole server: unrelated
+    // tools keep working, only defaulting current_time calls fail, and a
+    // warning is printed at startup.
+    let data_dir = temp_data_dir("server-stdio-bad-config");
+    let config_path = data_dir.join("config.toml");
+    fs::write(&config_path, "default_timezone = \"Mars/Olympus\"\n").expect("write config");
+    let mut child = Command::new(binary())
+        .arg("--config")
+        .arg(&config_path)
+        .args(["server", "start", "--transport", "stdio"])
+        .env("TIME_KEEP_DATA_DIR", &data_dir)
+        .env_remove("TIME_KEEP_TZ")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn stdio server with bad config");
+
+    let mut stdin = child.stdin.take().expect("server stdin");
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"timer_list","arguments":{{}}}}}}"#
+    )
+    .expect("write timer_list");
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"current_time","arguments":{{}}}}}}"#
+    )
+    .expect("write defaulting current_time");
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"current_time","arguments":{{"timezones":["UTC"]}}}}}}"#
+    )
+    .expect("write explicit current_time");
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for stdio server");
+    assert!(
+        output.status.success(),
+        "server must not exit on bad config"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    assert!(
+        stderr.contains("warning") && stderr.contains("default timezone"),
+        "startup should warn about the invalid default: {stderr}"
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    let responses = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON-RPC line"))
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 3);
+    assert_eq!(
+        responses[0]["result"]["isError"], false,
+        "timer_list must keep working"
+    );
+    assert_eq!(
+        responses[1]["result"]["isError"], true,
+        "defaulting current_time must return a structured error"
+    );
+    let error_payload: serde_json::Value = serde_json::from_str(
+        responses[1]["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text result"),
+    )
+    .expect("error payload");
+    assert_eq!(error_payload["error"]["error_code"], "INVALID_PARAMS");
+    assert_eq!(
+        responses[2]["result"]["isError"], false,
+        "explicit timezones must keep working"
+    );
+}
+
+#[test]
+fn server_stdio_picks_up_config_edits_without_restart() {
+    // Defaults resolve per call, so a long-running server follows config
+    // changes (and OS timezone changes via the `system` token).
+    let data_dir = temp_data_dir("server-stdio-config-freshness");
+    let config_path = data_dir.join("config.toml");
+    fs::write(&config_path, "default_timezone = \"Europe/Amsterdam\"\n").expect("write config");
+    let mut child = Command::new(binary())
+        .arg("--config")
+        .arg(&config_path)
+        .args(["server", "start", "--transport", "stdio"])
+        .env("TIME_KEEP_DATA_DIR", &data_dir)
+        .env_remove("TIME_KEEP_TZ")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn stdio server");
+
+    let mut stdin = child.stdin.take().expect("server stdin");
+    let stdout = child.stdout.take().expect("server stdout");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut line = String::new();
+
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"current_time","arguments":{{}}}}}}"#
+    )
+    .expect("write first call");
+    std::io::BufRead::read_line(&mut reader, &mut line).expect("read first response");
+    let first: serde_json::Value = serde_json::from_str(&line).expect("JSON-RPC line");
+    let first_payload: serde_json::Value = serde_json::from_str(
+        first["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text result"),
+    )
+    .expect("tool payload");
+    assert_eq!(first_payload["times"][0]["timezone"], "Europe/Amsterdam");
+
+    // Edit the config while the server is running.
+    fs::write(&config_path, "default_timezone = \"Asia/Tokyo\"\n").expect("rewrite config");
+
+    line.clear();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"current_time","arguments":{{}}}}}}"#
+    )
+    .expect("write second call");
+    std::io::BufRead::read_line(&mut reader, &mut line).expect("read second response");
+    let second: serde_json::Value = serde_json::from_str(&line).expect("JSON-RPC line");
+    let second_payload: serde_json::Value = serde_json::from_str(
+        second["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text result"),
+    )
+    .expect("tool payload");
+    assert_eq!(second_payload["times"][0]["timezone"], "Asia/Tokyo");
+
+    drop(stdin);
+    let status = child.wait().expect("wait for stdio server");
+    assert!(status.success());
+}
+
+#[test]
 fn server_http_serves_health_ready_and_tools_list() {
     let port = unused_port();
     let data_dir = temp_data_dir("server-http");
     let mut child = ChildGuard::new(
         Command::new(binary())
             .args([
+                "--config",
+                "/nonexistent/time-keep/config.toml",
                 "server",
                 "start",
                 "--transport",
@@ -179,6 +383,7 @@ fn server_http_serves_health_ready_and_tools_list() {
                 &port.to_string(),
             ])
             .env("TIME_KEEP_DATA_DIR", &data_dir)
+            .env_remove("TIME_KEEP_TZ")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -235,6 +440,8 @@ fn server_http_mcp_timer_tool_calls_persist_state() {
     let mut child = ChildGuard::new(
         Command::new(binary())
             .args([
+                "--config",
+                "/nonexistent/time-keep/config.toml",
                 "server",
                 "start",
                 "--transport",
@@ -243,6 +450,7 @@ fn server_http_mcp_timer_tool_calls_persist_state() {
                 &port.to_string(),
             ])
             .env("TIME_KEEP_DATA_DIR", &data_dir)
+            .env_remove("TIME_KEEP_TZ")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -318,10 +526,196 @@ fn now_outputs_requested_timezones() {
 
 #[test]
 fn now_defaults_to_utc() {
-    let output = Command::new(binary()).arg("now").output().expect("run now");
+    // Scrub default-timezone inputs so the test is hermetic regardless of the
+    // developer's own TIME_KEEP_TZ or ~/.config/time-keep/config.toml.
+    let output = Command::new(binary())
+        .args(["--config", "/nonexistent/time-keep/config.toml", "now"])
+        .env_remove("TIME_KEEP_TZ")
+        .output()
+        .expect("run now");
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     assert_eq!(json["times"][0]["timezone"], "UTC");
+}
+
+#[test]
+fn now_uses_config_default_timezone() {
+    let dir = temp_data_dir("now-config-default");
+    let config_path = dir.join("config.toml");
+    fs::write(&config_path, "default_timezone = \"Europe/Amsterdam\"\n").expect("write config");
+    let output = Command::new(binary())
+        .args(["--config"])
+        .arg(&config_path)
+        .arg("now")
+        .env_remove("TIME_KEEP_TZ")
+        .output()
+        .expect("run now");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    let times = json["times"].as_array().expect("times array");
+    assert_eq!(times.len(), 1);
+    assert_eq!(times[0]["timezone"], "Europe/Amsterdam");
+}
+
+#[test]
+fn now_env_list_overrides_config_default() {
+    let dir = temp_data_dir("now-env-override");
+    let config_path = dir.join("config.toml");
+    fs::write(&config_path, "default_timezone = \"Europe/Amsterdam\"\n").expect("write config");
+    let output = Command::new(binary())
+        .args(["--config"])
+        .arg(&config_path)
+        .arg("now")
+        .env("TIME_KEEP_TZ", "Asia/Tokyo,UTC")
+        .output()
+        .expect("run now");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    let times = json["times"].as_array().expect("times array");
+    assert_eq!(times.len(), 2);
+    assert_eq!(times[0]["timezone"], "Asia/Tokyo");
+    assert_eq!(times[1]["timezone"], "UTC");
+}
+
+#[test]
+fn now_explicit_tz_beats_env_and_config() {
+    let dir = temp_data_dir("now-explicit-wins");
+    let config_path = dir.join("config.toml");
+    fs::write(&config_path, "default_timezone = \"Europe/Amsterdam\"\n").expect("write config");
+    let output = Command::new(binary())
+        .args(["--config"])
+        .arg(&config_path)
+        .args(["now", "--tz", "America/New_York"])
+        .env("TIME_KEEP_TZ", "Asia/Tokyo")
+        .output()
+        .expect("run now");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    let times = json["times"].as_array().expect("times array");
+    assert_eq!(times.len(), 1);
+    assert_eq!(times[0]["timezone"], "America/New_York");
+}
+
+#[test]
+fn now_invalid_config_default_is_structured_error() {
+    let dir = temp_data_dir("now-bad-config");
+    let config_path = dir.join("config.toml");
+    fs::write(&config_path, "default_timezone = \"Mars/Olympus\"\n").expect("write config");
+    let output = Command::new(binary())
+        .args(["--config"])
+        .arg(&config_path)
+        .arg("now")
+        .env_remove("TIME_KEEP_TZ")
+        .output()
+        .expect("run now");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&output.stderr).expect("valid json");
+    assert_eq!(json["error"]["error_code"], "INVALID_PARAMS");
+}
+
+#[test]
+fn broken_config_does_not_block_unrelated_commands() {
+    let dir = temp_data_dir("broken-config-isolated");
+    let config_path = dir.join("config.toml");
+    fs::write(&config_path, "not valid toml [").expect("write config");
+
+    // config path must keep working so users can debug their setup.
+    let output = Command::new(binary())
+        .args(["--config"])
+        .arg(&config_path)
+        .args(["config", "path"])
+        .output()
+        .expect("run config path");
+    assert!(
+        output.status.success(),
+        "config path must not read config contents"
+    );
+
+    // Commands that never use the default timezone are also unaffected.
+    let output = Command::new(binary())
+        .args(["--config"])
+        .arg(&config_path)
+        .args(["calendar", "2026-06-18"])
+        .output()
+        .expect("run calendar");
+    assert!(
+        output.status.success(),
+        "calendar must not read config contents"
+    );
+
+    // Explicit --tz on now skips the config file too.
+    let output = Command::new(binary())
+        .args(["--config"])
+        .arg(&config_path)
+        .args(["now", "--tz", "UTC"])
+        .output()
+        .expect("run now with explicit tz");
+    assert!(
+        output.status.success(),
+        "explicit --tz must not read config contents"
+    );
+
+    // But now without --tz surfaces the parse error.
+    let output = Command::new(binary())
+        .args(["--config"])
+        .arg(&config_path)
+        .arg("now")
+        .env_remove("TIME_KEEP_TZ")
+        .output()
+        .expect("run now without tz");
+    assert_eq!(output.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&output.stderr).expect("valid json");
+    assert_eq!(json["error"]["error_code"], "INVALID_PARAMS");
+}
+
+#[test]
+fn env_default_wins_even_when_config_is_broken() {
+    // TIME_KEEP_TZ has higher precedence than the config file, so it must
+    // work without ever reading (or failing on) a broken config.
+    let dir = temp_data_dir("env-beats-broken-config");
+    let config_path = dir.join("config.toml");
+    fs::write(&config_path, "not valid toml [").expect("write config");
+    let output = Command::new(binary())
+        .args(["--config"])
+        .arg(&config_path)
+        .arg("now")
+        .env("TIME_KEEP_TZ", "Asia/Tokyo")
+        .output()
+        .expect("run now");
+    assert!(
+        output.status.success(),
+        "env override must short-circuit the broken config"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["times"][0]["timezone"], "Asia/Tokyo");
+}
+
+#[test]
+fn unknown_config_keys_warn_but_do_not_fail() {
+    // Configs written for other versions of time-keep must keep working.
+    let dir = temp_data_dir("unknown-config-keys");
+    let config_path = dir.join("config.toml");
+    fs::write(
+        &config_path,
+        "future_setting = true\ndefault_timezone = \"Europe/Amsterdam\"\n",
+    )
+    .expect("write config");
+    let output = Command::new(binary())
+        .args(["--config"])
+        .arg(&config_path)
+        .arg("now")
+        .env_remove("TIME_KEEP_TZ")
+        .output()
+        .expect("run now");
+    assert!(output.status.success(), "unknown keys must not be fatal");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["times"][0]["timezone"], "Europe/Amsterdam");
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    assert!(
+        stderr.contains("future_setting"),
+        "unknown key should be warned about: {stderr}"
+    );
 }
 
 #[test]

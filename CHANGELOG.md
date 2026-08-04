@@ -13,8 +13,14 @@ for release tags.
   or `default_timezones`, plus a `TIME_KEEP_TZ` environment override. `now` and
   the `current_time` MCP tool use the configured default when no timezone is
   given. A `system`/`local` token opts in to operating-system timezone
-  detection. Explicit `--tz` still wins, and the zero-config default remains
-  UTC.
+  detection (validated against the IANA database, with POSIX path-form `TZ`
+  and `posix/`/`right/` tzdata variants handled). Explicit `--tz` still wins,
+  an explicit empty MCP `timezones` list still means UTC, and the zero-config
+  default remains UTC. Only the commands that use the default read the config
+  file, unknown config keys warn instead of failing, the env override applies
+  even when the config file is invalid, and the MCP server re-resolves per
+  call (picking up config and OS timezone changes) instead of failing to start
+  on a bad default.
 
 ### Changed
 

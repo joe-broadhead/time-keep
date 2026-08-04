@@ -39,12 +39,19 @@ pub(crate) fn detect_system_timezone() -> Option<String> {
     system_timezone_from(env::var_os("TZ"), std::fs::read_link("/etc/localtime").ok())
 }
 
-/// Pure detection logic, split out for testing.
+/// Pure detection logic, split out for testing. Every result is validated
+/// against the real IANA database, never guessed from shape.
 ///
 /// Precedence:
-/// 1. `TZ` when it is a plausible IANA name (respects container/session overrides).
-/// 2. The `.../zoneinfo/<Area>/<Location>` tail of the `/etc/localtime` symlink.
-/// 3. `TZ` as a last resort even if it is a bare token like `UTC`.
+/// 1. `TZ` when it parses as an IANA name (respects container/session
+///    overrides, including digit-bearing names like `EST5EDT`).
+/// 2. `TZ` in the POSIX zoneinfo-path form (`TZ=:/usr/share/zoneinfo/<name>`),
+///    resolved through the same path extraction as the symlink.
+/// 3. The `.../zoneinfo/<Area>/<Location>` tail of the `/etc/localtime`
+///    symlink, with `posix/` and `right/` tzdata variants normalized away.
+///
+/// POSIX rule strings such as `CET-1CEST,M3.5.0,M10.5.0/3` are not IANA names
+/// and fall through to the symlink.
 fn system_timezone_from(
     tz_env: Option<OsString>,
     localtime_link: Option<PathBuf>,
@@ -54,42 +61,40 @@ fn system_timezone_from(
         .map(|value| value.trim().trim_start_matches(':').trim().to_string())
         .filter(|value| !value.is_empty());
 
-    if let Some(tz) = tz_env.as_deref()
-        && looks_like_iana_name(tz)
-    {
-        return Some(tz.to_string());
+    if let Some(tz) = tz_env.as_deref() {
+        if is_valid_timezone_name(tz) {
+            return Some(tz.to_string());
+        }
+        if tz.starts_with('/')
+            && let Some(name) = zoneinfo_tail(Some(Path::new(tz)))
+        {
+            return Some(name);
+        }
     }
 
-    if let Some(name) = zoneinfo_tail(localtime_link.as_deref()) {
-        return Some(name);
-    }
-
-    tz_env
+    zoneinfo_tail(localtime_link.as_deref())
 }
 
-/// Extract the timezone name that follows a `zoneinfo/` path segment.
+/// Extract and validate the timezone name that follows a `zoneinfo/` path
+/// segment, normalizing the `posix/` and `right/` tzdata variant directories
+/// some distributions link through.
 fn zoneinfo_tail(link: Option<&Path>) -> Option<String> {
     let text = link?.to_str()?;
     let marker = "zoneinfo/";
     let index = text.rfind(marker)?;
-    let tail = &text[index + marker.len()..];
-    (!tail.is_empty()).then(|| tail.to_string())
+    let mut tail = &text[index + marker.len()..];
+    for variant in ["posix/", "right/"] {
+        if let Some(stripped) = tail.strip_prefix(variant) {
+            tail = stripped;
+        }
+    }
+    (is_valid_timezone_name(tail)).then(|| tail.to_string())
 }
 
-/// A loose IANA-name check: an `Area/Location` name (optionally with digits or
-/// signs, e.g. `Etc/GMT+5`), or a bare all-alphabetic token such as `UTC`/`GMT`.
-/// Rejects POSIX TZ rules like `CET-1CEST,M3.5.0,M10.5.0/3`, which always carry
-/// a comma or whitespace that IANA names never contain.
-fn looks_like_iana_name(value: &str) -> bool {
-    if value.is_empty() || value.contains(',') || value.chars().any(char::is_whitespace) {
-        return false;
-    }
-    if value.contains('/') {
-        return true;
-    }
-    value
-        .chars()
-        .all(|ch| ch.is_ascii_alphabetic() || ch == '_')
+/// Whether `value` is a real IANA timezone name, checked against the embedded
+/// database rather than inferred from its shape.
+fn is_valid_timezone_name(value: &str) -> bool {
+    crate::timezones::ensure_valid_timezone(value).is_ok()
 }
 
 fn xdg_home(xdg_value: Option<OsString>, home_value: Option<OsString>, fallback: &str) -> PathBuf {
@@ -174,12 +179,47 @@ mod tests {
     }
 
     #[test]
+    fn system_timezone_strips_posix_and_right_tzdata_variants() {
+        let posix = system_timezone_from(
+            None,
+            Some(PathBuf::from("/usr/share/zoneinfo/posix/Europe/Amsterdam")),
+        );
+        assert_eq!(posix.as_deref(), Some("Europe/Amsterdam"));
+
+        let right = system_timezone_from(
+            None,
+            Some(PathBuf::from("/usr/share/zoneinfo/right/Asia/Tokyo")),
+        );
+        assert_eq!(right.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    #[test]
     fn system_timezone_prefers_iana_tz_env() {
         let detected = system_timezone_from(
             Some(OsString::from(":America/New_York")),
             Some(PathBuf::from("/usr/share/zoneinfo/Europe/Amsterdam")),
         );
         assert_eq!(detected.as_deref(), Some("America/New_York"));
+    }
+
+    #[test]
+    fn system_timezone_accepts_digit_bearing_iana_tz_env() {
+        // EST5EDT is a valid IANA name; it must beat the symlink.
+        let detected = system_timezone_from(
+            Some(OsString::from("EST5EDT")),
+            Some(PathBuf::from("/usr/share/zoneinfo/Europe/Amsterdam")),
+        );
+        assert_eq!(detected.as_deref(), Some("EST5EDT"));
+    }
+
+    #[test]
+    fn system_timezone_resolves_posix_path_form_tz_env() {
+        // POSIX allows TZ to point at a zoneinfo file directly.
+        let detected = system_timezone_from(
+            Some(OsString::from(":/usr/share/zoneinfo/Europe/Paris")),
+            Some(PathBuf::from("/usr/share/zoneinfo/Asia/Tokyo")),
+        );
+        assert_eq!(detected.as_deref(), Some("Europe/Paris"));
     }
 
     #[test]
@@ -202,6 +242,11 @@ mod tests {
         assert_eq!(system_timezone_from(None, None), None);
         assert_eq!(
             system_timezone_from(None, Some(PathBuf::from("/etc/localtime"))),
+            None
+        );
+        // Garbage TZ with no symlink must not be returned verbatim.
+        assert_eq!(
+            system_timezone_from(Some(OsString::from("Not/A_Zone")), None),
             None
         );
     }
