@@ -28,5 +28,6 @@ holidays = "0.1.0"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

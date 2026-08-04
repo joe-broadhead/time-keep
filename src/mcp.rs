@@ -78,7 +78,10 @@ const HEADER_LINE_LIMIT_BYTES: usize = 8 * 1024;
 const BODY_LIMIT_BYTES: usize = 1_048_576;
 
 pub(crate) fn run_server(app: &App, args: &ServerStartArgs) -> Result<()> {
-    let runtime = Arc::new(McpRuntime::new(app.data_dir().to_path_buf()));
+    let runtime = Arc::new(McpRuntime::new(
+        app.data_dir().to_path_buf(),
+        app.default_timezones().to_vec(),
+    ));
     match args.transport {
         Transport::Stdio => run_stdio(runtime),
         Transport::StreamableHttp => run_http(runtime, args),
@@ -88,15 +91,28 @@ pub(crate) fn run_server(app: &App, args: &ServerStartArgs) -> Result<()> {
 #[derive(Debug)]
 struct McpRuntime {
     data_dir: PathBuf,
+    default_timezones: Vec<String>,
 }
 
 impl McpRuntime {
-    fn new(data_dir: PathBuf) -> Self {
-        Self { data_dir }
+    fn new(data_dir: PathBuf, default_timezones: Vec<String>) -> Self {
+        Self {
+            data_dir,
+            default_timezones,
+        }
     }
 
     fn timer_store(&self) -> Result<TimerStore> {
         TimerStore::open(timer_db_path(&self.data_dir))
+    }
+
+    /// Timezones to report when a `current_time` call omits `timezones`.
+    fn now_timezones(&self, requested: Vec<String>) -> Vec<String> {
+        if requested.is_empty() {
+            self.default_timezones.clone()
+        } else {
+            requested
+        }
     }
 }
 
@@ -565,7 +581,8 @@ fn call_tool(runtime: &McpRuntime, name: &str, args: &Map<String, Value>) -> Res
 
     match name {
         "current_time" => {
-            let timezones = optional_string_array(args, "timezones")?.unwrap_or_default();
+            let requested = optional_string_array(args, "timezones")?.unwrap_or_default();
+            let timezones = runtime.now_timezones(requested);
             let format = parse_time_format(optional_string(args, "format")?.as_deref())?;
             serde_json::to_value(timezones::current_time(&timezones, format)?).map_err(Into::into)
         }
@@ -765,7 +782,7 @@ fn tool_definitions() -> Vec<Value> {
             "description": "Show current time in one or more IANA timezones.",
             "inputSchema": object_schema(
                 vec![
-                    ("timezones", array_schema("IANA timezone names. Defaults to UTC.")),
+                    ("timezones", array_schema("IANA timezone names. Defaults to the configured default timezone(s), or UTC when none is configured.")),
                     ("format", enum_schema(&["rfc3339", "iso8601", "epoch"])),
                 ],
                 &[],
@@ -1192,7 +1209,7 @@ mod tests {
 
     #[test]
     fn mcp_protocol_lists_exact_tool_names() {
-        let runtime = Arc::new(McpRuntime::new(temp_data_dir("list")));
+        let runtime = Arc::new(McpRuntime::new(temp_data_dir("list"), Vec::new()));
         let response = handle_jsonrpc_text(
             &runtime,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
@@ -1208,7 +1225,10 @@ mod tests {
 
     #[test]
     fn mcp_protocol_rejects_missing_jsonrpc_version() {
-        let runtime = Arc::new(McpRuntime::new(temp_data_dir("missing-jsonrpc")));
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir("missing-jsonrpc"),
+            Vec::new(),
+        ));
         let response =
             handle_jsonrpc_text(&runtime, r#"{"id":1,"method":"tools/list"}"#).expect("response");
         assert_eq!(response["id"], 1);
@@ -1219,7 +1239,7 @@ mod tests {
 
     #[test]
     fn mcp_protocol_batches_responses_and_skips_notifications() {
-        let runtime = Arc::new(McpRuntime::new(temp_data_dir("batch")));
+        let runtime = Arc::new(McpRuntime::new(temp_data_dir("batch"), Vec::new()));
         let response = handle_jsonrpc_text(
             &runtime,
             r#"[
@@ -1240,7 +1260,7 @@ mod tests {
 
     #[test]
     fn mcp_protocol_calls_current_time() {
-        let runtime = Arc::new(McpRuntime::new(temp_data_dir("current-time")));
+        let runtime = Arc::new(McpRuntime::new(temp_data_dir("current-time"), Vec::new()));
         let response = handle_jsonrpc_text(
             &runtime,
             r#"{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"current_time","arguments":{"timezones":["UTC"],"format":"rfc3339"}}}"#,
@@ -1256,8 +1276,63 @@ mod tests {
     }
 
     #[test]
+    fn mcp_current_time_uses_configured_default_when_timezones_omitted() {
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir("current-time-default"),
+            vec!["Europe/Amsterdam".to_string()],
+        ));
+        let response = handle_jsonrpc_text(
+            &runtime,
+            r#"{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"current_time","arguments":{}}}"#,
+        )
+        .expect("response");
+        assert_eq!(response["result"]["isError"], false);
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text result");
+        let payload: Value = serde_json::from_str(text).expect("tool payload");
+        assert_eq!(payload["times"][0]["timezone"], "Europe/Amsterdam");
+    }
+
+    #[test]
+    fn mcp_current_time_explicit_timezone_overrides_default() {
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir("current-time-override"),
+            vec!["Europe/Amsterdam".to_string()],
+        ));
+        let response = handle_jsonrpc_text(
+            &runtime,
+            r#"{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"current_time","arguments":{"timezones":["Asia/Tokyo"]}}}"#,
+        )
+        .expect("response");
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text result");
+        let payload: Value = serde_json::from_str(text).expect("tool payload");
+        assert_eq!(payload["times"][0]["timezone"], "Asia/Tokyo");
+    }
+
+    #[test]
+    fn mcp_current_time_defaults_to_utc_without_configuration() {
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir("current-time-utc"),
+            Vec::new(),
+        ));
+        let response = handle_jsonrpc_text(
+            &runtime,
+            r#"{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"current_time","arguments":{}}}"#,
+        )
+        .expect("response");
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text result");
+        let payload: Value = serde_json::from_str(text).expect("tool payload");
+        assert_eq!(payload["times"][0]["timezone"], "UTC");
+    }
+
+    #[test]
     fn mcp_protocol_returns_structured_tool_error() {
-        let runtime = Arc::new(McpRuntime::new(temp_data_dir("tool-error")));
+        let runtime = Arc::new(McpRuntime::new(temp_data_dir("tool-error"), Vec::new()));
         let response = handle_jsonrpc_text(
             &runtime,
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"timezone_info","arguments":{"timezone":"Madrid"}}}"#,
@@ -1274,7 +1349,10 @@ mod tests {
 
     #[test]
     fn mcp_protocol_rejects_unknown_tool_argument() {
-        let runtime = Arc::new(McpRuntime::new(temp_data_dir("unknown-argument")));
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir("unknown-argument"),
+            Vec::new(),
+        ));
         let response = handle_jsonrpc_text(
             &runtime,
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"current_time","arguments":{"timezone":"UTC"}}}"#,
@@ -1329,7 +1407,10 @@ mod tests {
 
     #[test]
     fn mcp_protocol_timer_tools_persist_in_runtime_data_dir() {
-        let runtime = Arc::new(McpRuntime::new(temp_data_dir("timer-persistence")));
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir("timer-persistence"),
+            Vec::new(),
+        ));
         let set = handle_jsonrpc_text(
             &runtime,
             r#"{"jsonrpc":"2.0","id":"set","method":"tools/call","params":{"name":"timer_set","arguments":{"name":"release-check","deadline":"2026-07-01T17:00:00-04:00","description":"Release smoke","tags":["Work","release"]}}}"#,

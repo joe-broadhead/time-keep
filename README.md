@@ -179,6 +179,29 @@ Global options:
 --data-dir <path>
 ```
 
+## Default Timezone
+
+`now` and the `current_time` MCP tool report UTC when no timezone is given. To
+change that default, set it in `config.toml`:
+
+```toml
+default_timezone = "Europe/Madrid"
+# Or an ordered list, which takes precedence over the singular form:
+default_timezones = ["Europe/Madrid", "UTC"]
+# Or detect the operating-system timezone:
+default_timezone = "system"
+```
+
+Resolution precedence (highest first): explicit `--tz` flags, then the
+`TIME_KEEP_TZ` environment variable (single name, comma-separated list, or
+`system`), then `config.toml`, then UTC.
+
+```bash
+TIME_KEEP_TZ=Europe/Madrid time-keep now
+```
+
+See [Output, Config, And Paths](docs/reference/output-config.md) for details.
+
 ## Timers
 
 Timers persist locally. Use `TIME_KEEP_DATA_DIR` for isolated tests and agent

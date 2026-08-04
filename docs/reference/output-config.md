@@ -50,8 +50,45 @@ Fallback:
 ~/.config/time-keep/config.toml
 ```
 
-The v0.0.0 CLI resolves the path but does not require a config file for normal
-operation.
+The config file is optional. With no config file, behavior is unchanged.
+
+## Default Timezone
+
+By default, `now` and the `current_time` MCP tool report UTC when no timezone is
+given. You can set a default timezone (or an ordered list) in `config.toml`:
+
+```toml
+# Single default timezone.
+default_timezone = "Europe/Amsterdam"
+
+# Or an ordered list (takes precedence over default_timezone when both are set).
+default_timezones = ["Europe/Amsterdam", "UTC"]
+```
+
+Use the special value `system` (alias `local`) to detect the operating-system
+timezone from the `TZ` environment variable or the `/etc/localtime` symlink:
+
+```toml
+default_timezone = "system"
+```
+
+The default is resolved with the following precedence (highest first):
+
+1. Explicit `--tz` flags on `now` (or the `timezones` argument to
+   `current_time`).
+2. The `TIME_KEEP_TZ` environment variable. Accepts a single IANA name, a
+   comma-separated list, or the `system`/`local` token.
+3. `default_timezones`, then `default_timezone`, from `config.toml`.
+4. UTC.
+
+Only IANA timezone names are accepted. An invalid name, or a `system` token that
+cannot be resolved, produces a structured `INVALID_PARAMS` error rather than a
+silent fallback. `TIME_KEEP_TZ` is handy for one-off overrides:
+
+```bash
+TIME_KEEP_TZ=Europe/Amsterdam time-keep now
+TIME_KEEP_TZ=system time-keep now
+```
 
 ## Data Path
 

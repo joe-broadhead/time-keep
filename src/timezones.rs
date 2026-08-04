@@ -42,6 +42,13 @@ pub(crate) fn current_time_at(
     })
 }
 
+/// Validate that `name` is an accepted IANA timezone, returning the same
+/// structured error as the time commands on failure. Used when resolving
+/// configured/environment default timezones.
+pub(crate) fn ensure_valid_timezone(name: &str) -> Result<()> {
+    parse_tz(name).map(|_| ())
+}
+
 pub(crate) fn list_timezones(region: Option<&str>) -> TimezoneList {
     let normalized_region = region
         .map(str::trim)

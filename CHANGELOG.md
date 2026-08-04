@@ -7,6 +7,15 @@ for release tags.
 
 ## [Unreleased]
 
+### Added
+
+- Optional `config.toml` support for a default timezone via `default_timezone`
+  or `default_timezones`, plus a `TIME_KEEP_TZ` environment override. `now` and
+  the `current_time` MCP tool use the configured default when no timezone is
+  given. A `system`/`local` token opts in to operating-system timezone
+  detection. Explicit `--tz` still wins, and the zero-config default remains
+  UTC.
+
 ### Changed
 
 - Polished public-facing README, installation, contributing, and release
