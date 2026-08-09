@@ -861,6 +861,7 @@ dependencies = [
  "csv",
  "ctrlc",
  "holidays",
+ "iana-time-zone",
  "rusqlite",
  "serde",
  "serde_json",

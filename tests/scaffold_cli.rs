@@ -558,6 +558,27 @@ fn now_uses_config_default_timezone() {
 }
 
 #[test]
+fn explicitly_empty_config_list_overrides_singular_default() {
+    let dir = temp_data_dir("now-empty-config-list");
+    let config_path = dir.join("config.toml");
+    fs::write(
+        &config_path,
+        "default_timezone = \"Europe/Amsterdam\"\ndefault_timezones = []\n",
+    )
+    .expect("write config");
+    let output = Command::new(binary())
+        .args(["--config"])
+        .arg(&config_path)
+        .arg("now")
+        .env_remove("TIME_KEEP_TZ")
+        .output()
+        .expect("run now");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["times"][0]["timezone"], "UTC");
+}
+
+#[test]
 fn now_env_list_overrides_config_default() {
     let dir = temp_data_dir("now-env-override");
     let config_path = dir.join("config.toml");
@@ -612,6 +633,58 @@ fn now_invalid_config_default_is_structured_error() {
     assert!(output.stdout.is_empty());
     let json: serde_json::Value = serde_json::from_slice(&output.stderr).expect("valid json");
     assert_eq!(json["error"]["error_code"], "INVALID_PARAMS");
+}
+
+#[test]
+fn unknown_config_key_does_not_corrupt_structured_error() {
+    let dir = temp_data_dir("now-bad-config-with-unknown-key");
+    let config_path = dir.join("config.toml");
+    fs::write(
+        &config_path,
+        "future_setting = true\ndefault_timezone = \"Mars/Olympus\"\n",
+    )
+    .expect("write config");
+    let output = Command::new(binary())
+        .args(["--config"])
+        .arg(&config_path)
+        .arg("now")
+        .env_remove("TIME_KEEP_TZ")
+        .output()
+        .expect("run now");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&output.stderr).expect("valid JSON only");
+    assert_eq!(json["error"]["error_code"], "INVALID_PARAMS");
+    assert_eq!(json["error"]["details"]["value"], "Mars/Olympus");
+}
+
+#[test]
+fn system_default_rejects_unmappable_posix_tz_rule() {
+    let output = Command::new(binary())
+        .args(["--config", "/nonexistent/time-keep/config.toml", "now"])
+        .env("TIME_KEEP_TZ", "system")
+        .env("TZ", "UTC0")
+        .output()
+        .expect("run now");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&output.stderr).expect("valid JSON only");
+    assert_eq!(json["error"]["error_code"], "INVALID_PARAMS");
+    assert_eq!(json["error"]["details"]["system_timezone_source"], "TZ");
+    assert_eq!(json["error"]["details"]["value"], "UTC0");
+}
+
+#[test]
+fn empty_tz_override_maps_system_default_to_utc() {
+    let output = Command::new(binary())
+        .args(["--config", "/nonexistent/time-keep/config.toml", "now"])
+        .env("TIME_KEEP_TZ", "system")
+        .env("TZ", "")
+        .output()
+        .expect("run now");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
+    assert_eq!(json["times"][0]["timezone"], "UTC");
 }
 
 #[test]

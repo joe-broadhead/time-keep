@@ -66,6 +66,62 @@ jobs:
       - name: Test
         run: cargo test --locked --all-features
 
+  platform-build:
+    name: Build (${{ matrix.asset }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: linux-x86_64
+            ext: ""
+          - os: macos-26
+            target: aarch64-apple-darwin
+            asset: macos-arm64
+            ext: ""
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+            asset: macos-x86_64
+            ext: ""
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            asset: windows-x86_64
+            ext: ".exe"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install Rust
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --target "${TARGET_TRIPLE}"
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Build release target
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: cargo build --locked --release --all-features --target "${TARGET_TRIPLE}"
+
+      - name: Smoke system timezone detection
+        shell: bash
+        env:
+          BIN_EXT: ${{ matrix.ext }}
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bin="target/${TARGET_TRIPLE}/release/time-keep${BIN_EXT}"
+          "${bin}" --version
+          env -u TZ TIME_KEEP_TZ=system "${bin}" --config /nonexistent/time-keep/config.toml now
+
   docs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20

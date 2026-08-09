@@ -181,8 +181,8 @@ Global options:
 
 ## Default Timezone
 
-`now` and the `current_time` MCP tool report UTC when no timezone is given. To
-change that default, set it in `config.toml`:
+With no configured default, `now` and the `current_time` MCP tool report UTC
+when no timezone is given. To change that default, set it in `config.toml`:
 
 ```toml
 default_timezone = "Europe/Madrid"
@@ -190,7 +190,7 @@ default_timezone = "Europe/Madrid"
 # Or an ordered list, which takes precedence over the singular form:
 # default_timezones = ["Europe/Madrid", "UTC"]
 
-# Or detect the operating-system timezone:
+# Or detect the operating-system timezone cross-platform:
 # default_timezone = "system"
 ```
 

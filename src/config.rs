@@ -11,14 +11,14 @@
 //! warning so configs written for newer versions keep working on older
 //! binaries (and vice versa).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::{
     error::{Result, TimeKeepError},
     timezones,
-    util::detect_system_timezone,
+    util::{SystemTimezoneDetection, detect_system_timezone},
 };
 
 /// Environment variable that overrides the configured default timezone(s).
@@ -36,13 +36,17 @@ const KNOWN_KEYS: [&str; 2] = ["default_timezone", "default_timezones"];
 /// Parsed `config.toml` contents. All fields are optional.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct Config {
-    /// Single default timezone. Ignored when `default_timezones` is non-empty.
+    /// Single default timezone. Ignored when `default_timezones` is present.
     #[serde(default)]
     pub(crate) default_timezone: Option<String>,
     /// Ordered list of default timezones. Takes precedence over the singular
     /// `default_timezone` when both are set.
     #[serde(default)]
-    pub(crate) default_timezones: Vec<String>,
+    pub(crate) default_timezones: Option<Vec<String>>,
+    #[serde(skip)]
+    unknown_keys: Vec<String>,
+    #[serde(skip)]
+    source_path: PathBuf,
 }
 
 impl Config {
@@ -68,26 +72,38 @@ impl Config {
             .with_detail("config_path", serde_json::json!(path.display().to_string()))
         };
         let table: toml::Table = toml::from_str(contents).map_err(parse_error)?;
-        for key in table.keys() {
-            if !KNOWN_KEYS.contains(&key.as_str()) {
-                tracing::warn!(
-                    "ignoring unknown key \"{key}\" in config file {}",
-                    path.display()
-                );
-            }
-        }
-        table.try_into().map_err(parse_error)
+        let unknown_keys = table
+            .keys()
+            .filter(|key| !KNOWN_KEYS.contains(&key.as_str()))
+            .cloned()
+            .collect();
+        let mut config: Self = table.try_into().map_err(parse_error)?;
+        config.unknown_keys = unknown_keys;
+        config.source_path = path.to_path_buf();
+        Ok(config)
     }
 
     /// The raw configured timezone tokens, list taking precedence over the
     /// singular form. Empty when nothing is configured.
     fn configured_tokens(&self) -> Vec<String> {
-        if !self.default_timezones.is_empty() {
-            self.default_timezones.clone()
+        if let Some(timezones) = &self.default_timezones {
+            timezones.clone()
         } else if let Some(tz) = &self.default_timezone {
             vec![tz.clone()]
         } else {
             Vec::new()
+        }
+    }
+
+    /// Warn only after the complete configuration has resolved successfully.
+    /// This keeps machine-readable CLI errors valid JSON instead of prefixing
+    /// them with tracing output.
+    fn warn_unknown_keys(&self) {
+        for key in &self.unknown_keys {
+            tracing::warn!(
+                "ignoring unknown key \"{key}\" in config file {}",
+                self.source_path.display()
+            );
         }
     }
 }
@@ -119,10 +135,14 @@ fn resolve_from_parts(
     if let Some(raw) = env_tokens(env_value) {
         return resolve_tokens(&raw, TokenSource::Env);
     }
-    let configured = load_config()?.configured_tokens();
+    let config = load_config()?;
+    let configured = config.configured_tokens();
     if !configured.is_empty() {
-        return resolve_tokens(&configured, TokenSource::Config);
+        let resolved = resolve_tokens(&configured, TokenSource::Config)?;
+        config.warn_unknown_keys();
+        return Ok(resolved);
     }
+    config.warn_unknown_keys();
     Ok(Vec::new())
 }
 
@@ -175,13 +195,35 @@ fn resolve_tokens(tokens: &[String], source: TokenSource) -> Result<Vec<String>>
     let mut resolved = Vec::with_capacity(tokens.len());
     for token in tokens {
         let name = if SYSTEM_TOKENS.contains(&token.to_ascii_lowercase().as_str()) {
-            detect_system_timezone().ok_or_else(|| {
-                TimeKeepError::invalid_params(format!(
-                    "{} requested \"{token}\" but the system timezone could not be detected",
-                    source.label()
-                ))
-                .with_detail("source", serde_json::json!(source.label()))
-            })?
+            match detect_system_timezone() {
+                SystemTimezoneDetection::Detected(name) => name,
+                SystemTimezoneDetection::Unavailable => {
+                    return Err(TimeKeepError::invalid_params(format!(
+                        "{} requested \"{token}\" but the system timezone could not be detected",
+                        source.label()
+                    ))
+                    .with_detail("source", serde_json::json!(source.label())));
+                }
+                SystemTimezoneDetection::InvalidTzOverride(value) => {
+                    return Err(TimeKeepError::invalid_params(format!(
+                        "TZ is set to a value that cannot be mapped to an IANA timezone: {value}"
+                    ))
+                    .with_detail("source", serde_json::json!(source.label()))
+                    .with_detail("system_timezone_source", serde_json::json!("TZ"))
+                    .with_detail("value", serde_json::json!(value)));
+                }
+                SystemTimezoneDetection::InvalidSystemTimezone(value) => {
+                    return Err(TimeKeepError::invalid_params(format!(
+                        "the detected system timezone is not a valid IANA timezone: {value}"
+                    ))
+                    .with_detail("source", serde_json::json!(source.label()))
+                    .with_detail(
+                        "system_timezone_source",
+                        serde_json::json!("operating_system"),
+                    )
+                    .with_detail("value", serde_json::json!(value)));
+                }
+            }
         } else {
             token.clone()
         };
@@ -209,7 +251,7 @@ mod tests {
         let cfg = Config::load(Path::new("/nonexistent/time-keep/config.toml"))
             .expect("missing file is not an error");
         assert!(cfg.default_timezone.is_none());
-        assert!(cfg.default_timezones.is_empty());
+        assert!(cfg.default_timezones.is_none());
     }
 
     #[test]
@@ -241,6 +283,12 @@ mod tests {
             cfg.configured_tokens(),
             vec!["Europe/Amsterdam".to_string(), "Asia/Tokyo".to_string()]
         );
+    }
+
+    #[test]
+    fn explicitly_empty_list_takes_precedence_over_singular() {
+        let cfg = config("default_timezone = \"Europe/Amsterdam\"\ndefault_timezones = []\n");
+        assert!(cfg.configured_tokens().is_empty());
     }
 
     #[test]
