@@ -35,7 +35,7 @@ Environment overrides:
   TIME_KEEP_REPO                    GitHub repo slug (default: joe-broadhead/time-keep)
   TIME_KEEP_RELEASE_BASE_URL        Release base URL for tests/mirrors
   TIME_KEEP_GITHUB_TOKEN            Optional token for private repos or rate limits
-  TIME_KEEP_VERSION                 Release tag, such as v0.0.0 (default: latest)
+  TIME_KEEP_VERSION                 Release tag, such as v0.0.1 (default: latest)
   TIME_KEEP_INSTALL_DIR             Install directory for time-keep
   TIME_KEEP_INSTALL_SKILLS          1 to install Agent Skills (default: 0)
   TIME_KEEP_SKILLS_DIR              Skills destination (default: $HOME/.agents/skills)

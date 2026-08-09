@@ -110,7 +110,8 @@ nav:
       - Contributing: development/contributing.md
       - Agent Skills: development/agent-skills.md
       - Release: development/release.md
-      - Production Readiness Audit: development/production-readiness-audit-v0.0.0.md
+      - Production Readiness Audit v0.0.1: development/production-readiness-audit-v0.0.1.md
+      - Production Readiness Audit v0.0.0: development/production-readiness-audit-v0.0.0.md
       - Linear Plan: development/linear-v0.0.0.md
       - Product Contract: development/product-contract.md
       - Repo Conventions: development/repo-conventions.md

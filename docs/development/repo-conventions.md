@@ -124,16 +124,16 @@ Release automation must include:
 
 ## Intentional Deviations
 
-- Unlike `weather-signal`, v0.0.0 must not use runtime network APIs.
-- Unlike hosted `dbt-nova` patterns, v0.0.0 has no hosted auth or public
+- Unlike `weather-signal`, time-keep must not use runtime network APIs.
+- Unlike hosted `dbt-nova` patterns, time-keep has no hosted auth or public
   multi-user service mode.
 - Holiday data is explicitly bounded; docs and errors must not imply unbounded
   country/year support.
 - Holiday and holiday-aware business-day behavior is local-only at runtime; do
-  not introduce live holiday APIs for v0.0.0.
+  not introduce live holiday APIs.
 - Timer persistence is local SQLite only. Keep migrations in code with
   `PRAGMA user_version`, store deadlines in UTC, preserve original ISO/RFC3339
   inputs for display, default timezone-less ISO deadlines to UTC, and normalize
   tags before storage/filtering.
-- The repository is private during v0.0.0 implementation even though the docs
-  URL and release workflows are planned for the product.
+- Repository visibility and published documentation must not weaken the
+  local-first security model.

@@ -50,8 +50,72 @@ Fallback:
 ~/.config/time-keep/config.toml
 ```
 
-The v0.0.0 CLI resolves the path but does not require a config file for normal
-operation.
+The config file is optional. With no config file, behavior is unchanged.
+
+## Default Timezone
+
+With no configured default, `now` and the `current_time` MCP tool report UTC
+when no timezone is given. You can set a default timezone (or an ordered list)
+in `config.toml`:
+
+```toml
+# Single default timezone.
+default_timezone = "Europe/Amsterdam"
+
+# Or an ordered list (takes precedence over default_timezone when both are set).
+default_timezones = ["Europe/Amsterdam", "UTC"]
+```
+
+Use the special value `system` (alias `local`) to detect the operating-system
+timezone. An explicit `TZ` environment variable takes precedence and must be an
+IANA name or zoneinfo path. When `TZ` is unset, time-keep uses the platform
+timezone on Linux, macOS, Windows, and other supported targets:
+
+```toml
+default_timezone = "system"
+```
+
+The default is resolved with the following precedence (highest first):
+
+1. Explicit `--tz` flags on `now` (or the `timezones` argument to
+   `current_time`, including an explicit empty list, which means UTC).
+2. The `TIME_KEEP_TZ` environment variable. Accepts a single IANA name, a
+   comma-separated list, or the `system`/`local` token.
+3. `default_timezones`, then `default_timezone`, from `config.toml`.
+4. UTC.
+
+`TIME_KEEP_TZ` is consulted before the config file is read, so a valid
+environment override works even when the config file is invalid.
+
+Only IANA timezone names are accepted. An invalid name, or a `system` token that
+cannot be resolved, produces a structured `INVALID_PARAMS` error rather than a
+silent fallback. `TIME_KEEP_TZ` is handy for one-off overrides:
+
+```bash
+TIME_KEEP_TZ=Europe/Amsterdam time-keep now
+TIME_KEEP_TZ=system time-keep now
+```
+
+Because time-keep's public contract requires IANA names, an explicit POSIX
+`TZ` rule such as `UTC0` cannot be represented and returns `INVALID_PARAMS`.
+It is never replaced silently with the machine timezone. An explicitly empty
+`TZ` value has the POSIX meaning of UTC.
+
+Scoping and resilience:
+
+- Only the commands that use the default read the config file: `now` without
+  `--tz`, and the `current_time` MCP tool without a `timezones` argument. A
+  broken config never blocks `config path`, timers, calendar, holiday, or
+  business-day commands.
+- Unknown config keys are ignored with a warning, so configs written for other
+  time-keep versions keep working. Warnings never prefix or corrupt a
+  structured CLI error.
+- The MCP server starts even when the configured default is invalid: it prints
+  a warning at startup, and only `current_time` calls that rely on the default
+  return the structured error.
+- Defaults are re-resolved on every call, so a long-running MCP server picks up
+  config edits and operating-system timezone changes (the `system` token)
+  without a restart.
 
 ## Data Path
 
@@ -74,4 +138,4 @@ time-keep --data-dir /tmp/time-keep-data timer list
 TIME_KEEP_DATA_DIR=/tmp/time-keep-data time-keep timer list
 ```
 
-Only timers persist in v0.0.0.
+Only timers persist.

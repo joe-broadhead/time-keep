@@ -7,10 +7,34 @@ for release tags.
 
 ## [Unreleased]
 
+## [0.0.1] - 2026-08-09
+
+### Added
+
+- Optional `config.toml` support for a default timezone via `default_timezone`
+  or `default_timezones`, plus a `TIME_KEEP_TZ` environment override. `now` and
+  the `current_time` MCP tool use the configured default when no timezone is
+  given. A `system`/`local` token opts in to operating-system timezone
+  detection across Linux, macOS, Windows, and other supported targets
+  (validated against the IANA database, with POSIX path-form `TZ` and
+  `posix/`/`right/` tzdata variants handled). Unmappable POSIX `TZ` rules fail
+  explicitly instead of silently falling back to a different timezone.
+  Explicit `--tz` still wins, an explicit empty MCP `timezones` list still
+  means UTC, an explicitly empty config list wins over the singular setting,
+  and the zero-config default remains UTC. Only the commands that use the
+  default read the config file, unknown config keys warn without corrupting
+  structured errors, the env override applies even when the config file is
+  invalid, and the MCP server re-resolves per call (picking up config and OS
+  timezone changes) instead of failing to start on a bad default.
+
 ### Changed
 
-- Polished public-facing README, installation, contributing, and release
-  readiness docs after the v0.0.0 tag.
+- Updated the packaged agent skill to distinguish the zero-config UTC fallback
+  from configured timezone defaults.
+- Added release-platform PR builds and system-timezone smoke coverage for Linux,
+  Apple Silicon and Intel macOS, and Windows.
+- Refreshed public-facing README, installation, contributing, and release
+  readiness docs for the v0.0.1 release.
 - Removed obsolete CLI dead-code scaffolding left over from the bootstrap plan.
 
 ## [0.0.0] - 2026-06-19

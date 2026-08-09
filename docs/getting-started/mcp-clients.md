@@ -36,7 +36,7 @@ curl http://127.0.0.1:8769/readyz
 ```
 
 JSON-RPC requests are accepted with `POST /mcp`. Streaming `GET /mcp` returns
-`405 Method Not Allowed` in v0.0.0.
+`405 Method Not Allowed`.
 
 ## Data Isolation
 

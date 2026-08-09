@@ -12,7 +12,7 @@ The contract is intentionally boring:
 - Calendar and date math use absolute inputs and deterministic rules.
 - Timers persist locally in SQLite.
 - Holiday data is offline and bounded to `2000..=2030`.
-- MCP stdio and streamable HTTP expose the same v0.0.0 workflows to agents.
+- MCP stdio and streamable HTTP expose the same workflows to agents.
 
 ## Core Commands
 

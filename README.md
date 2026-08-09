@@ -104,7 +104,7 @@ SBOMs, and provenance JSON assets.
 
 ```bash
 # macOS Apple Silicon, using an authenticated GitHub CLI session.
-gh release download v0.0.0 \
+gh release download \
   --repo joe-broadhead/time-keep \
   -p time-keep-macos-arm64.tar.gz \
   -p time-keep-macos-arm64.sha256
@@ -179,6 +179,31 @@ Global options:
 --data-dir <path>
 ```
 
+## Default Timezone
+
+With no configured default, `now` and the `current_time` MCP tool report UTC
+when no timezone is given. To change that default, set it in `config.toml`:
+
+```toml
+default_timezone = "Europe/Madrid"
+
+# Or an ordered list, which takes precedence over the singular form:
+# default_timezones = ["Europe/Madrid", "UTC"]
+
+# Or detect the operating-system timezone cross-platform:
+# default_timezone = "system"
+```
+
+Resolution precedence (highest first): explicit `--tz` flags, then the
+`TIME_KEEP_TZ` environment variable (single name, comma-separated list, or
+`system`), then `config.toml`, then UTC.
+
+```bash
+TIME_KEEP_TZ=Europe/Madrid time-keep now
+```
+
+See [Output, Config, And Paths](docs/reference/output-config.md) for details.
+
 ## Timers
 
 Timers persist locally. Use `TIME_KEEP_DATA_DIR` for isolated tests and agent
@@ -208,7 +233,7 @@ Fallback path:
 ## Offline Holiday Coverage
 
 Holiday and holiday-aware business-day results come from generated offline
-data. The v0.0.0 holiday coverage is explicitly bounded to years `2000..=2030`.
+data. Holiday coverage is explicitly bounded to years `2000..=2030`.
 Requests outside that range return structured `INVALID_PARAMS` errors with the
 supported coverage in `details`.
 
@@ -228,7 +253,7 @@ Streamable HTTP serves JSON-RPC `POST /mcp`, plus `GET /healthz` and
 `GET /readyz`. It binds to `127.0.0.1` by default and warns on non-loopback
 binds. Keep it on loopback unless an authenticating proxy controls access.
 
-The v0.0.0 MCP surface exposes:
+The MCP surface exposes:
 
 ```text
 current_time, list_timezones, timezone_info, convert_timezone,

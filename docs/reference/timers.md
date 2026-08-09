@@ -1,6 +1,6 @@
 # Timers
 
-Timers are the only persistent runtime state in v0.0.0.
+Timers are the only persistent runtime state.
 
 ## Commands
 

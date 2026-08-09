@@ -1,6 +1,6 @@
 # Release
 
-time-keep releases from `master`.
+time-keep releases from `master`. The current target is `v0.0.1`.
 
 ## Prepare
 
@@ -9,7 +9,8 @@ Before preparing a release:
 1. Move user-visible changes from `CHANGELOG.md` `Unreleased` into the target
    version section.
 2. Ensure `Cargo.toml` `version` matches the target version.
-3. Run the local quality gates.
+3. Ensure `Cargo.lock` records the same package version.
+4. Complete the production readiness audit and run the local quality gates.
 
 ```bash
 cargo fmt --check
@@ -40,6 +41,11 @@ branch push and PR creation trigger the required CI checks. `release-tag.yml`
 requires `RELEASE_TAG_TOKEN` with `contents:write` so pushing `vX.Y.Z` triggers
 the release workflow.
 
+The preparation workflow does not edit version metadata. The selected base
+branch must already contain the matching `Cargo.toml`, `Cargo.lock`, and
+`CHANGELOG.md` changes. It then creates a release branch with an empty release
+commit so the release PR can receive an independent CI and approval gate.
+
 The documented asset set is four files per platform:
 
 ```text
@@ -66,3 +72,16 @@ time-keep-windows-x86_64.provenance.json
 `v0.0.0` was cut from `master` after JOE-177, the production readiness review
 and audit, was complete. JOE-174 records the final release execution and
 published artifact smoke tests.
+
+PR #2 stages the code, metadata, changelog, and
+[v0.0.1 production readiness audit](production-readiness-audit-v0.0.1.md) for
+the next release. After PR #2 merges and `master` CI is green:
+
+1. Dispatch **Prepare Release** with version `0.0.1` and base branch `master`.
+2. Review the generated `release/0.0.1` PR and wait for all required checks.
+3. Merge that release PR. The tag workflow will create and push `v0.0.1`.
+4. Wait for the release workflow to publish all platform assets.
+5. Verify the published installer, binary, completions, MCP stdio, and MCP HTTP
+   paths before declaring the release complete.
+
+No release branch or tag should be created before PR #2 is merged.

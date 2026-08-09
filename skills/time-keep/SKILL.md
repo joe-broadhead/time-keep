@@ -31,7 +31,9 @@ All MCP tools are prefixed `time-keep_`:
 
 ## Guardrails
 
-- Default timezone is **UTC** — always be explicit.
+- With no configured default, the timezone is **UTC**. `now` and
+  `current_time` can use a configured default when the caller omits one; pass
+  an explicit IANA timezone for reproducible workflows.
 - Holiday data is offline, bounded to **2000–2030**. Mention this when used.
 - Timers use local SQLite at `~/.local/share/time-keep/timers.db`.
 - Do not mutate the default timer database during tests; use `TIME_KEEP_DATA_DIR="$(mktemp -d)"`.

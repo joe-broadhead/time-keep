@@ -9,7 +9,7 @@ local-first: current time, timezone operations, calendar math, business days,
 holiday lookups, and timers must work without hosted auth, cloud sync, network
 time APIs, or live holiday APIs.
 
-Core areas planned for v0.0.0:
+Core areas:
 
 - `src/main.rs` - binary entrypoint, tracing, and command dispatch.
 - `src/cli.rs` - Clap command, option, and parser definitions.
@@ -50,7 +50,7 @@ When editing workflow files, run `actionlint` if it is available.
 ## Development Rules
 
 - Keep each commit scoped to one Linear issue.
-- Preserve the v0.0.0 public CLI and MCP contracts unless the Linear issue
+- Preserve the public CLI and MCP contracts unless the Linear issue
   explicitly changes the contract.
 - JSON is the default and source-of-truth output contract. Table and CSV output
   should be useful, but must not redefine behavior.

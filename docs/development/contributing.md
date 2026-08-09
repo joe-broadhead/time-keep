@@ -18,4 +18,5 @@ See also:
 
 - [Repo Conventions](repo-conventions.md)
 - [Release Policy](release-policy.md)
-- [Production Readiness Audit](production-readiness-audit-v0.0.0.md)
+- [Production Readiness Audit: v0.0.1](production-readiness-audit-v0.0.1.md)
+- [Production Readiness Audit: v0.0.0](production-readiness-audit-v0.0.0.md)
