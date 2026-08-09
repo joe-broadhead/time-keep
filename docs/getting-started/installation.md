@@ -47,7 +47,7 @@ SBOMs, provenance JSON assets, and GitHub-hosted attestations where supported.
 
 ```bash
 # macOS Apple Silicon, using an authenticated GitHub CLI session.
-gh release download v0.0.0 \
+gh release download \
   --repo joe-broadhead/time-keep \
   -p time-keep-macos-arm64.tar.gz \
   -p time-keep-macos-arm64.sha256

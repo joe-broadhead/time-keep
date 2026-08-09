@@ -6,6 +6,7 @@ This project releases from `master`.
 
 - Default branch: `master`
 - First release tag: `v0.0.0`
+- Current release target: `v0.0.1`
 - Tag format: `vX.Y.Z`
 - Release preparation branches: `release/X.Y.Z`
 
@@ -29,12 +30,17 @@ Release milestones are complete only when:
 
 ## Release Flow
 
-1. Move relevant changelog entries from `Unreleased` into `## [X.Y.Z]`.
-2. Set `Cargo.toml` version to `X.Y.Z`.
-3. Open a `release/X.Y.Z` PR through release preparation automation.
-4. Merge the release PR to `master` after validation and approval.
-5. Create tag `vX.Y.Z` through release tag automation.
-6. Publish binaries, checksums, SBOM, and provenance through release automation.
+1. In a normal product PR, move relevant changelog entries from `Unreleased`
+   into `## [X.Y.Z]` and set both Cargo metadata files to `X.Y.Z`.
+2. Merge that PR to `master` after its production readiness review and all
+   required checks pass.
+3. Open a `release/X.Y.Z` PR through release preparation automation. This
+   workflow validates metadata already on `master`; it does not change it.
+4. Merge the release PR to `master` after its independent validation and
+   approval gate.
+5. Let release tag automation create `vX.Y.Z` from that merge.
+6. Publish binaries, checksums, SBOM, provenance, and attestations through
+   release automation.
 7. Verify install and MCP smoke checks from published artifacts.
 
 ## Required Local Gates

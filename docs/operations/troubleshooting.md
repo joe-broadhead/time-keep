@@ -44,14 +44,14 @@ curl http://127.0.0.1:8769/healthz
 curl http://127.0.0.1:8769/readyz
 ```
 
-`GET /mcp` returns `405` in v0.0.0. Send JSON-RPC with `POST /mcp`.
+`GET /mcp` returns `405`. Send JSON-RPC with `POST /mcp`.
 
 ## Installer Cannot Resolve Latest
 
 Use an explicit release tag:
 
 ```bash
-TIME_KEEP_VERSION=v0.0.0 scripts/install.sh --dry-run
+TIME_KEEP_VERSION=v0.0.1 scripts/install.sh --dry-run
 ```
 
 For private repos or rate limits, set `TIME_KEEP_GITHUB_TOKEN`,

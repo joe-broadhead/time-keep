@@ -31,7 +31,7 @@ curl http://127.0.0.1:8769/healthz
 curl http://127.0.0.1:8769/readyz
 ```
 
-Streamable HTTP is stateless in v0.0.0. `POST /mcp` accepts JSON-RPC requests.
+Streamable HTTP is stateless. `POST /mcp` accepts JSON-RPC requests.
 `GET /mcp` returns `405 Method Not Allowed` until a future issue intentionally
 adds streaming reads.
 

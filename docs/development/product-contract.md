@@ -1,6 +1,8 @@
 # Product Contract
 
-This document is the implementation contract for `time-keep` v0.0.0.
+This document records the original implementation contract for `time-keep`
+v0.0.0. The maintained reference and operations documentation describes the
+current behavior.
 
 ## Identity
 
@@ -8,7 +10,7 @@ This document is the implementation contract for `time-keep` v0.0.0.
 | --- | --- |
 | Name | `time-keep` |
 | Repository | `joe-broadhead/time-keep` |
-| Visibility | Private during v0.0.0 implementation |
+| Initial visibility | Private during v0.0.0 implementation |
 | License | MIT |
 | Language | Rust |
 | Edition | 2024 |
@@ -111,7 +113,9 @@ Transports:
 
 ## Data, Time, and Calendar Rules
 
-- UTC is the default timezone when no timezone is supplied.
+- UTC is the zero-configuration default timezone when no timezone is supplied.
+- Starting with v0.0.1, users can opt into configured IANA defaults or system
+  timezone detection without changing that zero-configuration behavior.
 - IANA timezone names are required for timezone-aware operations.
 - Invalid timezone names return structured parameter errors.
 - Date arithmetic must document month-end and leap-year behavior.

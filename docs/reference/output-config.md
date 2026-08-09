@@ -138,4 +138,4 @@ time-keep --data-dir /tmp/time-keep-data timer list
 TIME_KEEP_DATA_DIR=/tmp/time-keep-data time-keep timer list
 ```
 
-Only timers persist in v0.0.0.
+Only timers persist.

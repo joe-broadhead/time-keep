@@ -59,8 +59,13 @@ jobs:
           git checkout --detach "${MERGE_SHA}"
 
           cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          lock_version="$(sed -n '/^name = "time-keep"$/ { n; s/^version = "\(.*\)"/\1/p; q; }' Cargo.lock)"
           if [ "${cargo_version}" != "${version}" ]; then
             echo "Cargo.toml version (${cargo_version}) does not match release branch version (${version})."
+            exit 1
+          fi
+          if [ "${lock_version}" != "${version}" ]; then
+            echo "Cargo.lock version (${lock_version}) does not match release branch version (${version})."
             exit 1
           fi
 

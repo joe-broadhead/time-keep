@@ -7,6 +7,8 @@ for release tags.
 
 ## [Unreleased]
 
+## [0.0.1] - 2026-08-09
+
 ### Added
 
 - Optional `config.toml` support for a default timezone via `default_timezone`
@@ -31,8 +33,8 @@ for release tags.
   from configured timezone defaults.
 - Added release-platform PR builds and system-timezone smoke coverage for Linux,
   Apple Silicon and Intel macOS, and Windows.
-- Polished public-facing README, installation, contributing, and release
-  readiness docs after the v0.0.0 tag.
+- Refreshed public-facing README, installation, contributing, and release
+  readiness docs for the v0.0.1 release.
 - Removed obsolete CLI dead-code scaffolding left over from the bootstrap plan.
 
 ## [0.0.0] - 2026-06-19
