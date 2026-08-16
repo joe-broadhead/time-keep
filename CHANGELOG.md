@@ -7,6 +7,14 @@ for release tags.
 
 ## [Unreleased]
 
+### Changed
+
+- `current_time` still advertises only `timezones` + `format`, but now accepts
+  the common agent misfires `timezone` / `tz` / `zone` / `zones` (string or
+  array) as aliases. A string `timezones` value is also accepted. Passing both
+  a canonical key and an alias is still an error. Unknown keys still report
+  the advertised allowlist.
+
 ## [0.0.1] - 2026-08-09
 
 ### Added
