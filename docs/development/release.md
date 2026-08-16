@@ -1,6 +1,6 @@
 # Release
 
-time-keep releases from `master`. The current target is `v0.0.1`.
+time-keep releases from `master`. The current target is `v0.0.2`.
 
 ## Prepare
 

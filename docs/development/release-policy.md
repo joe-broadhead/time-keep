@@ -6,7 +6,7 @@ This project releases from `master`.
 
 - Default branch: `master`
 - First release tag: `v0.0.0`
-- Current release target: `v0.0.1`
+- Current release target: `v0.0.2`
 - Tag format: `vX.Y.Z`
 - Release preparation branches: `release/X.Y.Z`
 

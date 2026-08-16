@@ -1,6 +1,6 @@
 [package]
 name = "time-keep"
-version = "0.0.1"
+version = "0.0.2"
 rust-version = "1.93"
 edition = "2024"
 description = "Agent clock MCP server and CLI. Current time, timezone ops, calendar queries, business days, timers, and holiday lookups."
