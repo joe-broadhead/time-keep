@@ -29,6 +29,16 @@ All MCP tools are prefixed `time-keep_`:
 | Delete a timer | `timer_delete` |
 | Check overdue timers | `timer_check` |
 
+## Arguments
+
+| Tool | Zone argument |
+|------|----------------|
+| `current_time` | `timezones` (array) or omit. **Not** `timezone`. |
+| `timezone_info` | `timezone` (string) |
+| `convert_timezone` | `from_timezone` + `to_timezone` |
+
+`current_time` example: `{ "timezones": ["UTC", "Europe/London"], "format": "rfc3339" }`. Empty `{}` uses the configured default (UTC when none is set). The server also accepts `timezone` / `tz` / `zone` / `zones` as aliases so a missed skill load is not a hard error — still send `timezones`.
+
 ## Guardrails
 
 - With no configured default, the timezone is **UTC**. `now` and

@@ -568,16 +568,28 @@ fn tools_call_result(
     Ok(tool_result(call_tool(runtime, name, arguments)))
 }
 
+/// Advertised `current_time` keys. Schema and error `allowed` lists stay
+/// canonical so callers learn `timezones`, not the sibling-tool misfires.
+const CURRENT_TIME_ZONE_ALIASES: [&str; 4] = ["timezone", "tz", "zone", "zones"];
+
 fn validate_tool_arguments(name: &str, args: &Map<String, Value>) -> Result<()> {
-    let Some(allowed) = allowed_tool_arguments(name) else {
+    let Some(accepted) = accepted_tool_arguments(name) else {
         return Ok(());
     };
     for key in args.keys() {
-        if !allowed.contains(&key.as_str()) {
+        if !accepted.contains(&key.as_str()) {
+            let allowed = allowed_tool_arguments(name).unwrap_or(accepted);
             return Err(unknown_arg_error(name, key, allowed));
         }
     }
     Ok(())
+}
+
+fn accepted_tool_arguments(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "current_time" => Some(&["timezones", "format", "timezone", "tz", "zone", "zones"]),
+        other => allowed_tool_arguments(other),
+    }
 }
 
 fn allowed_tool_arguments(name: &str) -> Option<&'static [&'static str]> {
@@ -608,7 +620,10 @@ fn call_tool(runtime: &McpRuntime, name: &str, args: &Map<String, Value>) -> Res
             // An explicit `timezones` argument always wins, including an
             // explicit empty array (the documented "defaults to UTC" shape).
             // Only an omitted argument falls back to the configured default.
-            let timezones = match optional_string_array(args, "timezones")? {
+            // Sibling tools use `timezone` / `from_timezone`; agents often send
+            // those keys here. Accept them as aliases so a missed skill load
+            // is not a hard error.
+            let timezones = match current_time_requested_timezones(args)? {
                 Some(requested) => requested,
                 None => runtime.default_timezones()?,
             };
@@ -1028,6 +1043,43 @@ fn optional_string_array(
     }
 }
 
+fn optional_iana_list(args: &Map<String, Value>, key: &'static str) -> Result<Option<Vec<String>>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(vec![value.clone()])),
+        Some(Value::Array(_)) => optional_string_array(args, key),
+        Some(value) => Err(type_arg_error(key, "string or array of strings", value)),
+    }
+}
+
+fn current_time_requested_timezones(args: &Map<String, Value>) -> Result<Option<Vec<String>>> {
+    let canonical = optional_iana_list(args, "timezones")?;
+    let mut alias_key: Option<&str> = None;
+    let mut alias_values: Option<Vec<String>> = None;
+    for key in CURRENT_TIME_ZONE_ALIASES {
+        if let Some(values) = optional_iana_list(args, key)? {
+            if alias_key.is_some() {
+                return Err(TimeKeepError::invalid_params(
+                    "current_time accepts only one timezone argument; use timezones",
+                )
+                .with_detail("parameter", json!("timezones"))
+                .with_detail("aliases", json!(CURRENT_TIME_ZONE_ALIASES)));
+            }
+            alias_key = Some(key);
+            alias_values = Some(values);
+        }
+    }
+    match (canonical, alias_values) {
+        (Some(_), Some(_)) => Err(TimeKeepError::invalid_params(
+            "current_time: pass timezones or timezone, not both",
+        )
+        .with_detail("parameter", json!("timezones"))
+        .with_detail("aliases", json!(CURRENT_TIME_ZONE_ALIASES))),
+        (Some(values), None) | (None, Some(values)) => Ok(Some(values)),
+        (None, None) => Ok(None),
+    }
+}
+
 fn optional_bool(args: &Map<String, Value>, key: &'static str) -> Result<Option<bool>> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -1417,7 +1469,7 @@ mod tests {
         ));
         let response = handle_jsonrpc_text(
             &runtime,
-            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"current_time","arguments":{"timezone":"UTC"}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"current_time","arguments":{"not_a_real_param":"UTC"}}}"#,
         )
         .expect("response");
         assert_eq!(response["result"]["isError"], true);
@@ -1427,8 +1479,68 @@ mod tests {
         let payload: Value = serde_json::from_str(text).expect("error payload");
         assert_eq!(payload["error"]["error_code"], "INVALID_PARAMS");
         assert_eq!(payload["error"]["details"]["tool"], "current_time");
-        assert_eq!(payload["error"]["details"]["parameter"], "timezone");
+        assert_eq!(payload["error"]["details"]["parameter"], "not_a_real_param");
         assert_eq!(payload["error"]["details"]["allowed"][0], "timezones");
+    }
+
+    fn call_current_time(label: &str, arguments: &str) -> Value {
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir(label),
+            test_defaults(vec!["Europe/Amsterdam".to_string()]),
+        ));
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{{"name":"current_time","arguments":{arguments}}}}}"#
+        );
+        let response = handle_jsonrpc_text(&runtime, &request).expect("response");
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        tool_payload(&response)
+    }
+
+    #[test]
+    fn mcp_current_time_accepts_timezone_string_alias() {
+        let payload = call_current_time("alias-timezone", r#"{"timezone":"UTC"}"#);
+        assert_eq!(payload["times"][0]["timezone"], "UTC");
+    }
+
+    #[test]
+    fn mcp_current_time_accepts_timezone_array_alias() {
+        let payload = call_current_time("alias-timezone-array", r#"{"timezone":["UTC"]}"#);
+        assert_eq!(payload["times"][0]["timezone"], "UTC");
+    }
+
+    #[test]
+    fn mcp_current_time_accepts_timezones_string() {
+        let payload = call_current_time("timezones-string", r#"{"timezones":"UTC"}"#);
+        assert_eq!(payload["times"][0]["timezone"], "UTC");
+    }
+
+    #[test]
+    fn mcp_current_time_accepts_tz_zone_and_zones_aliases() {
+        for (label, arguments) in [
+            ("alias-tz", r#"{"tz":"UTC"}"#),
+            ("alias-zone", r#"{"zone":"UTC"}"#),
+            ("alias-zones", r#"{"zones":["UTC"]}"#),
+        ] {
+            let payload = call_current_time(label, arguments);
+            assert_eq!(payload["times"][0]["timezone"], "UTC", "{label}");
+        }
+    }
+
+    #[test]
+    fn mcp_current_time_rejects_timezone_and_timezones_together() {
+        let runtime = Arc::new(McpRuntime::new(
+            temp_data_dir("alias-conflict"),
+            test_defaults(Vec::new()),
+        ));
+        let response = handle_jsonrpc_text(
+            &runtime,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"current_time","arguments":{"timezone":"UTC","timezones":["UTC"]}}}"#,
+        )
+        .expect("response");
+        assert_eq!(response["result"]["isError"], true);
+        let payload = tool_payload(&response);
+        assert_eq!(payload["error"]["error_code"], "INVALID_PARAMS");
+        assert_eq!(payload["error"]["details"]["parameter"], "timezones");
     }
 
     #[test]

@@ -8,6 +8,8 @@ Always convert "today", "tomorrow", "next Friday" to absolute ISO dates before c
 
 ## Timezone
 
+`current_time` takes `timezones` (array) or `{}` — never `timezone`. That singular key is only for `timezone_info` (see SKILL.md).
+
 ```json
 // timezone_info
 { "timezone": "Europe/London" }
