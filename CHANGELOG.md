@@ -7,6 +7,8 @@ for release tags.
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-08-16
+
 ### Changed
 
 - `current_time` still advertises only `timezones` + `format`, but now accepts
